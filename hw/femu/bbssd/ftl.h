@@ -7,6 +7,19 @@
 #define INVALID_LPN     (~(0ULL))
 #define UNMAPPED_PPA    (~(0ULL))
 
+
+//#define UPDATE_FREQ
+#define DEVICE_UTIL_DEBUG
+
+#ifdef UPDATE_FREQ 
+#define NR_TENANTS (2)
+#define LGROUPS_PER_TENANT (36)
+#define TOTAL_LPN (7730944 * 0.72)
+#define TOTAL_LGROUPS ((NR_TENANTS) * (LGROUPS_PER_TENANT))
+#define LPNS_PER_TENANT ((TOTAL_LPN) / (NR_TENANTS))
+#define LPNS_PER_LGROUP ((TOTAL_LPN) / (TOTAL_LGROUPS))
+#endif
+
 enum {
     NAND_READ =  0,
     NAND_WRITE = 1,
@@ -44,6 +57,11 @@ enum {
     FEMU_DISABLE_LOG = 7,
 };
 
+enum {						
+	RU_TYPE_NORMAL = 0, // 该RU用作正常写入
+	RU_TYPE_II_GC = 1, //该RU用作II GC写入
+	RU_TYPE_PI_GC = 2, //该RU用作PI GC写入
+};
 
 #define BLK_BITS    (16)
 #define PG_BITS     (16)
@@ -127,6 +145,8 @@ struct ssdparams {
     int gc_thres_lines;
     double gc_thres_pcent_high;
     int gc_thres_lines_high;
+	int gc_thres_rus;
+    int gc_thres_rus_high;
     bool enable_gc_delay;
 
     /* below are all calculated values */
@@ -140,6 +160,9 @@ struct ssdparams {
     int pgs_per_lun;  /* # of pages per LUN (Die) */
     int pgs_per_ch;   /* # of pages per channel */
     int tt_pgs;       /* total # of pages in the SSD */
+#ifdef DEVICE_UTIL_DEBUG
+	int tt_valid_pgs;	
+#endif
 
     int blks_per_lun; /* # of blocks per LUN */
     int blks_per_ch;  /* # of blocks per channel */
@@ -149,6 +172,13 @@ struct ssdparams {
     int pgs_per_line;
     int blks_per_line;
     int tt_lines;
+
+    int secs_per_ru;
+    int pgs_per_ru;
+    int blks_per_ru;
+	int chs_per_ru;
+	int luns_per_ru;
+    int tt_rus;	
 
     int pls_per_ch;   /* # of planes per channel */
     int tt_pls;       /* total # of planes in the SSD */
@@ -194,6 +224,49 @@ struct nand_cmd {
     int64_t stime; /* Coperd: request arrival time */
 };
 
+typedef struct ru {		
+	int id;
+	struct {
+		int ch;
+		int lun;
+		int pl;
+		int blk;
+		int pg;
+	} wp;
+	struct nand_block* blks[RG_DEGREE];
+	int ipc;
+	int vpc;
+	QTAILQ_ENTRY(ru) entry;		/* in either {free, victim, full} list */
+	size_t pos;					/* position in the priority queue for victim ru */
+	int ruhid;					/* needed for gc */
+	int rut;					/* ru type: normal, ii_gc, pi_gc */
+} ru; 					
+
+struct ruh {				
+	int ruht;					/* ruh type: ii_gc, pi_gc */
+	int* cur_ruids;
+	int* pi_gc_ruids;
+};						
+
+struct fdp_ru_mgmt {	
+	struct ru *rus;
+	QTAILQ_HEAD(free_ru_list, ru) free_ru_list;
+	pqueue_t *victim_ru_pq;
+    //QTAILQ_HEAD(victim_blk_list, blk) victim_blk_list;
+	QTAILQ_HEAD(full_ru_list, ru) full_ru_list;
+	int tt_rus;
+	int free_ru_cnt;
+	int victim_ru_cnt;
+	int full_ru_cnt; 
+	int ii_gc_ruid;			/* recalim unit for initially isolated gc */
+};							
+
+#ifdef UPDATE_FREQ 
+struct tenant {
+	int update_cnt[LGROUPS_PER_TENANT];
+};
+#endif
+
 struct ssd {
     char *ssdname;
     struct ssdparams sp;
@@ -202,7 +275,14 @@ struct ssd {
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
     struct write_pointer wp;
     struct line_mgmt lm;
+	struct fdp_ru_mgmt *rums; 	/* raclaim unit managements */		
+	struct ruh *ruhtbl;			/* ruh table */						
+	int *gc_cnt;				/* for two-level isolation gc */		
+	bool fdp_enabled;
 
+#ifdef UPDATE_FREQ
+	struct tenant ten[4];
+#endif
     /* lockless ring for communication with NVMe IO thread */
     struct rte_ring **to_ftl;
     struct rte_ring **to_poller;

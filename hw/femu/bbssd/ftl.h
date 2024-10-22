@@ -2,6 +2,7 @@
 #define __FEMU_FTL_H
 
 #include "../nvme.h"
+#include <math.h>
 
 #define INVALID_PPA     (~(0ULL))
 #define INVALID_LPN     (~(0ULL))
@@ -154,6 +155,19 @@ struct ssdparams {
     int tt_pls;       /* total # of planes in the SSD */
 
     int tt_luns;      /* total # of LUNs in the SSD */
+
+    // 磨损相关
+    int endurance;
+    double op;
+    int capacity;
+
+    // ecc相关
+    int ecc_corr_str;
+    double epsilon;
+    double alpha;
+    double k;
+    int read_retry; //总读重试次数
+    int gap; // 每次擦写增长的擦写次数（方便快速测试）
 };
 
 typedef struct line {
@@ -182,10 +196,12 @@ struct line_mgmt {
     pqueue_t *victim_line_pq;
     //QTAILQ_HEAD(victim_line_list, line) victim_line_list;
     QTAILQ_HEAD(full_line_list, line) full_line_list;
+    QTAILQ_HEAD(bad_line_list, line) bad_line_list;
     int tt_lines;
     int free_line_cnt;
     int victim_line_cnt;
     int full_line_cnt;
+    int bad_line_cnt;
 };
 
 struct nand_cmd {

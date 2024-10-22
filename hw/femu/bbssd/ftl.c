@@ -96,6 +96,7 @@ static void ssd_init_lines(struct ssd *ssd)
             victim_line_get_pri, victim_line_set_pri,
             victim_line_get_pos, victim_line_set_pos);
     QTAILQ_INIT(&lm->full_line_list);
+    QTAILQ_INIT(&lm->bad_line_list);
 
     lm->free_line_cnt = 0;
     for (int i = 0; i < lm->tt_lines; i++) {
@@ -112,6 +113,7 @@ static void ssd_init_lines(struct ssd *ssd)
     ftl_assert(lm->free_line_cnt == lm->tt_lines);
     lm->victim_line_cnt = 0;
     lm->full_line_cnt = 0;
+    lm->bad_line_cnt = 0;
 }
 
 static void ssd_init_write_pointer(struct ssd *ssd)
@@ -282,6 +284,16 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->gc_thres_lines_high = (int)((1 - spp->gc_thres_pcent_high) * spp->tt_lines);
     spp->enable_gc_delay = true;
 
+    spp->endurance = 300;
+    spp->op = 0.25;
+    spp->capacity = spp->tt_secs * spp->secsz;
+    spp->ecc_corr_str = 120;
+    spp->epsilon = 0.00148;
+    spp->alpha = 0.000000516375983;
+    spp->k = 2.05;
+	spp->read_retry = 0;
+
+	spp->gap = 5;
 
     check_params(spp);
 }
@@ -462,6 +474,7 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
     uint64_t nand_stime;
     struct ssdparams *spp = &ssd->sp;
     struct nand_lun *lun = get_lun(ssd, ppa);
+	struct nand_block *blk = get_blk(ssd, ppa);
     uint64_t lat = 0;
 
     switch (c) {
@@ -469,7 +482,20 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
         /* read: perform NAND cmd first */
         nand_stime = (lun->next_lun_avail_time < cmd_stime) ? cmd_stime : \
                      lun->next_lun_avail_time;
-        lun->next_lun_avail_time = nand_stime + spp->pg_rd_lat;
+
+        double ec = (double)blk->erase_cnt;
+		double rber = spp->epsilon + spp->alpha*pow(ec,spp->k);
+		rber = rber > 1.0 ? 1.0 : rber;
+		int bits_count = spp->secs_per_pg * spp->secsz * 8;
+
+		int read_retry = 0;
+		while ((int)(bits_count * rber) > spp->ecc_corr_str) {
+			rber /= 2.0;
+			read_retry += 1;
+		}
+		
+		spp->read_retry += read_retry;
+        lun->next_lun_avail_time = nand_stime + spp->pg_rd_lat * (1 + read_retry);
         lat = lun->next_lun_avail_time - cmd_stime;
 #if 0
         lun->next_lun_avail_time = nand_stime + spp->pg_rd_lat;
@@ -611,7 +637,7 @@ static void mark_block_free(struct ssd *ssd, struct ppa *ppa)
     ftl_assert(blk->npgs == spp->pgs_per_blk);
     blk->ipc = 0;
     blk->vpc = 0;
-    blk->erase_cnt++;
+    blk->erase_cnt += spp->gap;
 }
 
 static void gc_read_page(struct ssd *ssd, struct ppa *ppa)
@@ -761,8 +787,30 @@ static int do_gc(struct ssd *ssd, bool force)
         }
     }
 
-    /* update line status */
-    mark_line_free(ssd, &ppa);
+    ppa.g.ch = 0;
+    ppa.g.lun = 0;
+    ppa.g.pl = 0;
+    struct nand_block *block = get_blk(ssd, &ppa);
+    struct line_mgmt *lm = &ssd->lm;
+    struct line *line;
+
+    // 块到达磨损上限，弃用整个超级块
+    if (block->erase_cnt >= spp->endurance) {
+        line = get_line(ssd, &ppa);
+        line->ipc = 0;
+        line->vpc = 0;
+        /* move this line to bad line list */
+        QTAILQ_INSERT_TAIL(&lm->bad_line_list, line, entry);
+        lm->bad_line_cnt++;
+		ftl_log("Line %d becomes bad!\n", line->id);
+        if (((lm->bad_line_cnt * spp->secs_per_line) >=  spp->op * spp->capacity) || (lm->bad_line_cnt >= (spp->tt_lines - spp->gc_thres_lines_high))) {
+            ftl_err("SSD reaches its end of the life!\n");
+            abort();
+        }
+    } else {
+      /* update line status */
+      mark_line_free(ssd, &ppa);
+    }
 
     return 0;
 }

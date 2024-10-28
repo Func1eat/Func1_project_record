@@ -1,5 +1,7 @@
 #include "./nvme.h"
 
+#include "bbssd/ftl.h"
+
 #define NVME_IDENTIFY_DATA_SIZE 4096
 
 #if 0
@@ -816,14 +818,53 @@ static uint16_t nvme_error_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
 
 /* for gc stat */
 static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
-{ 
-#ifdef WAF_TEST
-	/*printf("n->host_writes: %ld\n", n->host_writes);
-	printf("n->gc_writes: %ld\n", n->gc_writes); */
-	printf("WAF: %lf\n", (double)(n->host_writes + n->gc_writes) / n->host_writes); 
-#endif
-	return NVME_SUCCESS; 
-	/*
+{
+    FILE *fp_wa = NULL;
+    struct fdp_ru_mgmt *rums = n->ssd->rums;
+  
+    double wa = ((n->ssd->sp).pages_from_wl + (n->ssd->sp).pages_from_gc + (n->ssd->sp).pages_from_host) * 1.0 / (n->ssd->sp).pages_from_host;
+    struct ru *ru;
+    unsigned long long util = 0;
+    for (int i = 0; i < rums->tt_rus; i++) {
+        ru = &rums->rus[i];
+        util += ru->vpc;
+    }
+
+    char path2wa[80] = "wa.log.";
+    char path2ec[80] = "ec.log.";
+    strcat(path2wa, n->ssd->ssdname);
+    strcat(path2ec, n->ssd->ssdname);
+    fp_wa = fopen(path2wa, "a+");
+    fprintf(fp_wa, "WA=%.3f, util: %.1f(GB), pages from Host: %"PRIu64", pages from GC: %"PRIu64", pages from WL: %"PRIu64", read retry: %"PRIu64", bad_ru_cnt = %d, pages_from_host_read=%"PRIu64", host_read_block=%"PRIu64", host_write_block=%"PRIu64"\n", wa, util*4.0/1024/1024, (n->ssd->sp).pages_from_host, (n->ssd->sp).pages_from_gc, (n->ssd->sp).pages_from_wl, (n->ssd->sp).read_retry, rums->bad_ru_cnt, (n->ssd->sp).pages_from_host_read, (n->ssd->sp).host_read_block, (n->ssd->sp).host_write_block);
+    fclose(fp_wa);
+    (n->ssd->sp).pages_from_gc = 0;
+    (n->ssd->sp).pages_from_host = 0;
+    (n->ssd->sp).pages_from_wl = 0;
+    (n->ssd->sp).pages_from_host_read = 0;
+    (n->ssd->sp).host_read_block = 0;
+    (n->ssd->sp).host_write_block = 0;
+
+    ftl_log("Free_ru_cnt = %d, util: %.1f(GB), full_ru_cnt = %d, victim_ru_cnt = %d, bad_ru_cnt = %d, read_retry_cnt=%"PRIu64", pages_from_host_read=%"PRIu64", host_read_block=%"PRIu64", host_write_block=%"PRIu64"\n",rums->free_ru_cnt, util*4.0/1024/1024, rums->full_ru_cnt, rums->victim_ru_cnt, rums->bad_ru_cnt, (n->ssd->sp).read_retry, (n->ssd->sp).pages_from_host_read, (n->ssd->sp).host_read_block, (n->ssd->sp).host_write_block);
+    (n->ssd->sp).read_retry = 0;
+    FILE *fp= fopen(path2ec, "a+");
+    if (fp != NULL) {
+		int* records = g_malloc0(sizeof(int) * rums->tt_rus);
+		for (int i = 0; i < rums->tt_rus; i ++) {
+			ru = &rums->rus[i];
+			records[i] = ru->erase_cnt;
+		}
+        for (int i = 0; i < rums->tt_rus; i++) {
+            fprintf(fp, "%d ", records[i]);
+        }
+        fprintf(fp, "\n");
+        fclose(fp);
+        free(records);
+    } else {
+        perror("Error");
+        printf("Endurance log file open error!\n");
+    }
+    
+    /***Ziyang: end ***/
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
 
@@ -856,7 +897,7 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
 
     n->aer_mask &= ~(1 << NVME_AER_TYPE_SMART);
 
-    return dma_read_prp(n, (uint8_t *)&smart, trans_len, prp1, prp2);*/
+    return dma_read_prp(n, (uint8_t *)&smart, trans_len, prp1, prp2);
 }
 
 static uint16_t nvme_cmd_effects(FemuCtrl *n, NvmeCmd *cmd, uint8_t csi,

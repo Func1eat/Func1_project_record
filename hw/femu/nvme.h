@@ -19,6 +19,8 @@
 #include "timing-model/timing.h"
 #include "time.h"
 
+// #include "bbssd/ftl.h"
+
 #define NVME_ID_NS_LBADS(ns)                                                  \
     ((ns)->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX((ns)->id_ns.flbas)].lbads)
 
@@ -1306,6 +1308,9 @@ typedef struct BbCtrlParams {
 
     int gc_thres_pcent;
     int gc_thres_pcent_high;
+
+    int fdp_enabled;
+    int cv_enabled;
 } BbCtrlParams;
 
 typedef struct ZNSCtrlParams {

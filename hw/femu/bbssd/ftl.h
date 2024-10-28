@@ -2,6 +2,7 @@
 #define __FEMU_FTL_H
 
 #include "../nvme.h"
+#include <math.h>
 
 #define INVALID_PPA     (~(0ULL))
 #define INVALID_LPN     (~(0ULL))
@@ -184,6 +185,27 @@ struct ssdparams {
     int tt_pls;       /* total # of planes in the SSD */
 
     int tt_luns;      /* total # of LUNs in the SSD */
+
+    // 磨损相关
+    int endurance;
+    double op;
+
+    // ecc相关
+    int ecc_corr_str;
+    double epsilon;
+    double alpha;
+    double k;
+    int gap; // 每次擦写增长的擦写次数（方便快速测试）
+
+    // 写放大相关
+    uint64_t read_retry;
+    uint64_t total_host_read;
+    uint64_t pages_from_host;
+    uint64_t pages_from_gc;
+    uint64_t pages_from_wl;
+    uint64_t pages_from_host_read;
+    uint64_t host_read_block;
+    uint64_t host_write_block;
 };
 
 typedef struct line {
@@ -240,6 +262,8 @@ typedef struct ru {
 	size_t pos;					/* position in the priority queue for victim ru */
 	int ruhid;					/* needed for gc */
 	int rut;					/* ru type: normal, ii_gc, pi_gc */
+
+	int erase_cnt;
 } ru; 					
 
 struct ruh {				
@@ -254,10 +278,12 @@ struct fdp_ru_mgmt {
 	pqueue_t *victim_ru_pq;
     //QTAILQ_HEAD(victim_blk_list, blk) victim_blk_list;
 	QTAILQ_HEAD(full_ru_list, ru) full_ru_list;
+	QTAILQ_HEAD(bad_ru_list, ru) bad_ru_list;
 	int tt_rus;
 	int free_ru_cnt;
 	int victim_ru_cnt;
 	int full_ru_cnt; 
+	int bad_ru_cnt;
 	int ii_gc_ruid;			/* recalim unit for initially isolated gc */
 };							
 
@@ -278,7 +304,7 @@ struct ssd {
 	struct fdp_ru_mgmt *rums; 	/* raclaim unit managements */		
 	struct ruh *ruhtbl;			/* ruh table */						
 	int *gc_cnt;				/* for two-level isolation gc */		
-	bool fdp_enabled;
+	int fdp_enabled;
 
 #ifdef UPDATE_FREQ
 	struct tenant ten[4];

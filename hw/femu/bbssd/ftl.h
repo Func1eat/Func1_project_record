@@ -159,15 +159,23 @@ struct ssdparams {
     // 磨损相关
     int endurance;
     double op;
-    int capacity;
 
     // ecc相关
     int ecc_corr_str;
     double epsilon;
     double alpha;
     double k;
-    int read_retry; //总读重试次数
     int gap; // 每次擦写增长的擦写次数（方便快速测试）
+
+    // 写放大相关
+    uint64_t read_retry;
+    uint64_t total_host_read;
+    uint64_t pages_from_host;
+    uint64_t pages_from_gc;
+    uint64_t pages_from_wl;
+    uint64_t pages_from_host_read;
+    uint64_t host_read_block;
+    uint64_t host_write_block;
 };
 
 typedef struct line {

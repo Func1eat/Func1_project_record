@@ -286,14 +286,18 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
 
     spp->endurance = 300;
     spp->op = 0.25;
-    spp->capacity = spp->tt_secs * spp->secsz;
-    spp->ecc_corr_str = 120;
+	//ftl_log("%lf\n", spp->op * spp->tt_secs);
+    spp->ecc_corr_str = 50;
     spp->epsilon = 0.00148;
     spp->alpha = 0.000000516375983;
     spp->k = 2.05;
 	spp->read_retry = 0;
 
-	spp->gap = 5;
+	spp->gap = 10;
+
+	spp->pages_from_host = 0;
+    spp->pages_from_gc = 0;
+    spp->pages_from_wl = 0;
 
     check_params(spp);
 }
@@ -493,7 +497,7 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
 			rber /= 2.0;
 			read_retry += 1;
 		}
-		
+		//ftl_log("rr:%d\n", read_retry);
 		spp->read_retry += read_retry;
         lun->next_lun_avail_time = nand_stime + spp->pg_rd_lat * (1 + read_retry);
         lat = lun->next_lun_avail_time - cmd_stime;
@@ -638,6 +642,7 @@ static void mark_block_free(struct ssd *ssd, struct ppa *ppa)
     blk->ipc = 0;
     blk->vpc = 0;
     blk->erase_cnt += spp->gap;
+	//ftl_log("blk:%d erase_cnt:%d\n", ppa->g.blk, blk->erase_cnt);
 }
 
 static void gc_read_page(struct ssd *ssd, struct ppa *ppa)
@@ -733,6 +738,7 @@ static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
         }
     }
 
+	(ssd->sp).pages_from_gc += cnt;
     ftl_assert(get_blk(ssd, ppa)->vpc == cnt);
 }
 
@@ -746,6 +752,67 @@ static void mark_line_free(struct ssd *ssd, struct ppa *ppa)
     QTAILQ_INSERT_TAIL(&lm->free_line_list, line, entry);
     lm->free_line_cnt++;
 }
+
+static void output_info_log(struct ssd *ssd) {
+	ftl_log("output the info log\n");
+  	FILE *fp_wa = NULL;
+    struct line_mgmt *lm = &(ssd->lm);
+  
+    double wa = ((ssd->sp).pages_from_wl + (ssd->sp).pages_from_gc + (ssd->sp).pages_from_host) * 1.0 / (ssd->sp).pages_from_host;
+    struct line *line;
+    unsigned long long util = 0;
+    for (int i = 0; i < lm->tt_lines; i++) {
+        line = &lm->lines[i];
+        util += line->vpc;
+    }
+
+    char path2wa[80] = "wa.log.";
+    char path2ec[80] = "ec.log.";
+    strcat(path2wa, ssd->ssdname);
+    strcat(path2ec, ssd->ssdname);
+    fp_wa = fopen(path2wa, "a+");
+    fprintf(fp_wa, "WA=%.3f, util: %.1f(GB), pages from Host: %"PRIu64", pages from GC: %"PRIu64", pages from WL: %"PRIu64", read retry: %"PRIu64", bad_line_cnt = %d, pages_from_host_read=%"PRIu64", host_read_block=%"PRIu64", host_write_block=%"PRIu64"\n", wa, util*4.0/1024/1024, (ssd->sp).pages_from_host, (ssd->sp).pages_from_gc, (ssd->sp).pages_from_wl, (ssd->sp).read_retry, lm->bad_line_cnt, (ssd->sp).pages_from_host_read, (ssd->sp).host_read_block, (ssd->sp).host_write_block);
+    fclose(fp_wa);
+    (ssd->sp).pages_from_gc = 0;
+    (ssd->sp).pages_from_host = 0;
+    (ssd->sp).pages_from_wl = 0;
+    (ssd->sp).pages_from_host_read = 0;
+    (ssd->sp).host_read_block = 0;
+    (ssd->sp).host_write_block = 0;
+
+    ftl_log("Free_line_cnt = %d, util: %.1f(GB), full_line_cnt = %d, victim_line_cnt = %d, bad_line_cnt = %d, read_retry_cnt=%"PRIu64", pages_from_host_read=%"PRIu64", host_read_block=%"PRIu64", host_write_block=%"PRIu64"\n",lm->free_line_cnt, util*4.0/1024/1024, lm->full_line_cnt, lm->victim_line_cnt, lm->bad_line_cnt, (ssd->sp).read_retry, (ssd->sp).pages_from_host_read, (ssd->sp).host_read_block, (ssd->sp).host_write_block);
+    (ssd->sp).read_retry = 0;
+
+    FILE *fp= fopen(path2ec, "a+");
+    if (fp != NULL) {
+        int chs = (ssd->sp).nchs;
+        int luns = (ssd->sp).luns_per_ch;
+        int pls = (ssd->sp).pls_per_lun;
+        int blks = (ssd->sp).blks_per_pl;
+		int* records = g_malloc0(sizeof(int) * blks);
+        struct ppa ppa;
+		ppa.g.ch = 0;
+		ppa.g.lun = 0;
+		ppa.g.pl = 0;
+		for (int i = 0; i < blks; i ++) {
+			ppa.g.blk = i;
+			struct nand_block *block = get_blk(ssd, &ppa);
+			records[i] = block->erase_cnt;
+		}
+        for (int i = 0; i < blks; i++) {
+            fprintf(fp, "%d ", records[i]);
+        }
+        fprintf(fp, "\n");
+        fclose(fp);
+        free(records);
+
+    } else {
+        perror("Error");
+        printf("Endurance log file open error!\n");
+    }
+	return;
+}
+
 
 static int do_gc(struct ssd *ssd, bool force)
 {
@@ -794,6 +861,8 @@ static int do_gc(struct ssd *ssd, bool force)
     struct line_mgmt *lm = &ssd->lm;
     struct line *line;
 
+	ftl_log("blk:%d erase_cnt:%d\n", ppa.g.blk, block->erase_cnt);
+
     // 块到达磨损上限，弃用整个超级块
     if (block->erase_cnt >= spp->endurance) {
         line = get_line(ssd, &ppa);
@@ -803,7 +872,8 @@ static int do_gc(struct ssd *ssd, bool force)
         QTAILQ_INSERT_TAIL(&lm->bad_line_list, line, entry);
         lm->bad_line_cnt++;
 		ftl_log("Line %d becomes bad!\n", line->id);
-        if (((lm->bad_line_cnt * spp->secs_per_line) >=  spp->op * spp->capacity) || (lm->bad_line_cnt >= (spp->tt_lines - spp->gc_thres_lines_high))) {
+        if (((lm->bad_line_cnt * spp->secs_per_line) >=  spp->op * spp->tt_secs) || (lm->bad_line_cnt >= (spp->tt_lines - spp->gc_thres_lines_high))) {
+			output_info_log(ssd);
             ftl_err("SSD reaches its end of the life!\n");
             abort();
         }
@@ -823,6 +893,7 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     struct ppa ppa;
     uint64_t start_lpn = lba / spp->secs_per_pg;
     uint64_t end_lpn = (lba + nsecs - 1) / spp->secs_per_pg;
+	(ssd->sp).pages_from_host_read += (end_lpn - start_lpn) + 1;
     uint64_t lpn;
     uint64_t sublat, maxlat = 0;
 
@@ -858,6 +929,9 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     int len = req->nlb;
     uint64_t start_lpn = lba / spp->secs_per_pg;
     uint64_t end_lpn = (lba + len - 1) / spp->secs_per_pg;
+
+	(ssd->sp).pages_from_host += (end_lpn - start_lpn) + 1;
+	
     struct ppa ppa;
     uint64_t lpn;
     uint64_t curlat = 0, maxlat = 0;

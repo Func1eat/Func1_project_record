@@ -884,6 +884,7 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
 			rber /= 2.0;
 			read_retry += 1;
 		}
+		read_retry = 0;
 		//ftl_log("rr:%d\n", read_retry);
 		spp->read_retry += read_retry;
         lun->next_lun_avail_time = nand_stime + spp->pg_rd_lat * (1 + read_retry);
@@ -1407,8 +1408,8 @@ static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, NvmeRequest *re
 	ruhid = victim_ru->ruhid; 
 	ruh = &ns->endgrp->fdp.ruhs[ruhid];	
 
-    ftl_debug("GC-ing line:%d,ipc=%d,victim=%d,full=%d,free=%d\n", ppa.g.blk,
-              victim_line->ipc, ssd->lm.victim_line_cnt, ssd->lm.full_line_cnt,
+    ftl_log("GC-ing line:%d,ipc=%d,victim=%d,full=%d,free=%d\n", ppa.g.blk,
+              victim_ru->ipc, ssd->lm.victim_line_cnt, ssd->lm.full_line_cnt,
               ssd->lm.free_line_cnt); 
 
 #ifdef FDP_DEBUG
@@ -1472,7 +1473,7 @@ static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, NvmeRequest *re
 	victim_ru->vpc = 0;
 
     // 块到达磨损上限，弃用整个超级块
-    if (victim_ru ->erase_cnt >= spp->endurance) {
+    if (0) {
 		QTAILQ_INSERT_TAIL(&rum->bad_ru_list, victim_ru, entry);
 		rum->bad_ru_cnt++;
 		ftl_log("Ru %d becomes bad!\n", victim_ru->id);

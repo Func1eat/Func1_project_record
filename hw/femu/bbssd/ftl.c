@@ -658,10 +658,10 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->enable_gc_delay = true; 
 
     spp->endurance = 300;
-    spp->op = 0.25;
+    spp->op = 0.0625;
 	//ftl_log("%lf\n", spp->op * spp->tt_secs);
     spp->ecc_corr_str = 50;
-    spp->epsilon = 0.00148;
+    spp->epsilon = 0.00048;
     spp->alpha = 0.000000516375983;
     spp->k = 2.05;
 	spp->read_retry = 0;

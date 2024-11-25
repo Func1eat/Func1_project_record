@@ -225,13 +225,27 @@ static int get_next_free_ruid(struct ssd *ssd, struct fdp_ru_mgmt *rum)
 		ftl_err("No free reclaim units left in [%s] !!!!\n", ssd->ssdname);
 		return -1;
 	}
+	
+	int hottest = retru->erase_cnt;
+	struct ru *ru_tmp = retru;
+
+	for (int i = 1; i < rum->free_ru_cnt; i++) {
+		retru = QTAILQ_NEXT(retru, entry);
+		if (retru->erase_cnt > hottest) {
+			hottest = retru->erase_cnt;
+			ru_tmp = retru;
+		} else if (retru->erase_cnt == hottest && retru->id < ru_tmp->id) {
+			ru_tmp = retru;
+		}
+	}
+
 #ifdef FDP_DEBUG 
 	printf("new ru: %d\n", retru->id);
 #endif
-	QTAILQ_REMOVE(&rum->free_ru_list, retru, entry);
+	QTAILQ_REMOVE(&rum->free_ru_list, ru_tmp, entry);
 	rum->free_ru_cnt--;
 
-	return retru->id; 
+	return ru_tmp->id; 
 }
 
 // 初始化所有ruh
@@ -1409,8 +1423,7 @@ static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, NvmeRequest *re
 	ruh = &ns->endgrp->fdp.ruhs[ruhid];	
 
     ftl_log("GC-ing line:%d,ipc=%d,victim=%d,full=%d,free=%d\n", ppa.g.blk,
-              victim_ru->ipc, ssd->lm.victim_line_cnt, ssd->lm.full_line_cnt,
-              ssd->lm.free_line_cnt); 
+              victim_ru->ipc, ssd->rums[rgid].victim_ru_cnt, ssd->rums[rgid].full_ru_cnt, ssd->rums[rgid].free_ru_cnt); 
 
 #ifdef FDP_DEBUG
 	printf("rgid: %d\n", rgid);

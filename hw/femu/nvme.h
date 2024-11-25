@@ -38,7 +38,7 @@
 #define NVME_FDP_MAXPIDS 	128			
 #define NVME_MAX_NAMESPACES 1			
 #define NVME_MAX_ENDGRPS	1			
-#define MAX_RUHS			2
+#define MAX_RUHS			4
 #define RG_DEGREE			64
 #define WAF_TEST
 

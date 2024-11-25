@@ -199,11 +199,17 @@ struct ssdparams {
 
     // 写放大相关
     uint64_t read_retry;
-    uint64_t total_host_read;
     uint64_t pages_from_host;
     uint64_t pages_from_gc;
     uint64_t pages_from_wl;
     uint64_t pages_from_host_read;
+
+    uint64_t read_retry_pre;
+    uint64_t pages_from_host_pre;
+    uint64_t pages_from_gc_pre;
+    uint64_t pages_from_wl_pre;
+    uint64_t pages_from_host_read_pre;
+    
     uint64_t host_read_block;
     uint64_t host_write_block;
 };
@@ -305,6 +311,8 @@ struct ssd {
 	struct ruh *ruhtbl;			/* ruh table */						
 	int *gc_cnt;				/* for two-level isolation gc */		
 	int fdp_enabled;
+
+  int cv_moderate;
 
 #ifdef UPDATE_FREQ
 	struct tenant ten[4];

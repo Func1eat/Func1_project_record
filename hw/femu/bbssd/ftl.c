@@ -4,6 +4,7 @@
 //#define FDP_DEBUG
 
 static void *ftl_thread(void *arg);
+static void output_info_log(struct ssd *ssd);
 
 static inline bool should_gc(struct ssd *ssd)
 {
@@ -213,7 +214,7 @@ static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 }
 
 // 从该rg的free_ru_list里取下一个
-static int get_next_free_ruid(struct ssd *ssd, struct fdp_ru_mgmt *rum)
+static int get_next_free_ruid(struct ssd *ssd, struct fdp_ru_mgmt *rum, int ruhid)
 {
 #ifdef FDP_DEBUG
 	printf("get_next_free_ruid() called -> ");
@@ -222,23 +223,76 @@ static int get_next_free_ruid(struct ssd *ssd, struct fdp_ru_mgmt *rum)
 
 	retru = QTAILQ_FIRST(&rum->free_ru_list);
 	if (!retru) {
-		ftl_err("No free reclaim units left in [%s] !!!!\n", ssd->ssdname);
-		return -1;
+		output_info_log(ssd);
+		ftl_err("SSD reaches its end of the life!\n");
+		abort();
 	}
 	
 	int hottest = retru->erase_cnt;
 	struct ru *ru_tmp = retru;
 
-	for (int i = 1; i < rum->free_ru_cnt; i++) {
-		retru = QTAILQ_NEXT(retru, entry);
-		if (retru->erase_cnt > hottest) {
-			hottest = retru->erase_cnt;
-			ru_tmp = retru;
-		} else if (retru->erase_cnt == hottest && retru->id < ru_tmp->id) {
-			ru_tmp = retru;
+	//热读
+	if (ruhid == 0) {
+		if (ssd->cv_moderate == 1) {
+			for (int i = 1; i < rum->free_ru_cnt; i++) {
+				retru = QTAILQ_NEXT(retru, entry);
+				if (retru->erase_cnt > hottest) {
+					hottest = retru->erase_cnt;
+					ru_tmp = retru;
+				} else if (retru->erase_cnt == hottest && retru->id < ru_tmp->id) {
+					ru_tmp = retru;
+				}
+			}
+		} // youngest block first
+		else {
+			for (int i = 1; i < rum->free_ru_cnt; i++) {
+				retru = QTAILQ_NEXT(retru, entry);
+				if (retru->erase_cnt < hottest) {
+					hottest = retru->erase_cnt;
+					ru_tmp = retru;
+				}
+			}
+		}
+	} else if (ruhid == 1) {
+		if (ssd->cv_moderate == 0) {
+			for (int i = 1; i < rum->free_ru_cnt; i++) {
+				retru = QTAILQ_NEXT(retru, entry);
+				if (retru->erase_cnt > hottest) {
+					hottest = retru->erase_cnt;
+					ru_tmp = retru;
+				} else if (retru->erase_cnt == hottest && retru->id < ru_tmp->id) {
+					ru_tmp = retru;
+				}
+			}
+		} // youngest block first
+		else {
+			for (int i = 1; i < rum->free_ru_cnt; i++) {
+				retru = QTAILQ_NEXT(retru, entry);
+				if (retru->erase_cnt < hottest) {
+					hottest = retru->erase_cnt;
+					ru_tmp = retru;
+				}
+			}
+		}
+	} else {
+		for (int i = 1; i < rum->free_ru_cnt; i++) {
+			retru = QTAILQ_NEXT(retru, entry);
+			if (retru->erase_cnt < hottest) {
+				hottest = retru->erase_cnt;
+				ru_tmp = retru;
+			}
 		}
 	}
 
+	
+  	// for (int i = 1; i < rum->free_ru_cnt; i++) {
+	// 	retru = QTAILQ_NEXT(retru, entry);
+	// 	if (retru->erase_cnt < hottest) {
+	// 		hottest = retru->erase_cnt;
+	// 		ru_tmp = retru;
+	// 	}
+	// }
+    
 #ifdef FDP_DEBUG 
 	printf("new ru: %d\n", retru->id);
 #endif
@@ -265,7 +319,7 @@ static void ssd_init_fdp_ruhtbl(struct FemuCtrl *n, struct ssd *ssd)
 		ruh->pi_gc_ruids = g_malloc0(sizeof(int) * endgrp->fdp.nrg);
 		for (int j = 0; j < endgrp->fdp.nrg; j++)  {
 			rum = &ssd->rums[j];
-			ruh->cur_ruids[j] = get_next_free_ruid(ssd, rum);
+			ruh->cur_ruids[j] = get_next_free_ruid(ssd, rum, i);
 		} 
 	} 
 	
@@ -282,7 +336,7 @@ static void ssd_init_fdp_ruhtbl(struct FemuCtrl *n, struct ssd *ssd)
 		rum = &ssd->rums[i]; 
 		
 		for (int j = 0; j < MAX_RUHS; j++) {
-			pi_gc_ruid = get_next_free_ruid(ssd, rum);
+			pi_gc_ruid = get_next_free_ruid(ssd, rum, j);
 			ssd->ruhtbl[j].pi_gc_ruids[i] = pi_gc_ruid;
 			rum->rus[pi_gc_ruid].rut = RU_TYPE_PI_GC;
 		} 
@@ -448,16 +502,16 @@ static void ssd_advance_fdp_write_pointer(struct ssd *ssd, uint16_t rgid, int lp
 					ru->ruhid = ruhid; 
 					// 若当前是迁移后的ru写完了，则要新找一个存放迁移数据的ru
 					if (ru->rut == RU_TYPE_II_GC) {
-						rum->ii_gc_ruid = get_next_free_ruid(ssd, rum);
+						rum->ii_gc_ruid = get_next_free_ruid(ssd, rum, ruhid);
 						rum->rus[rum->ii_gc_ruid].rut = RU_TYPE_II_GC;
 					}
 					else if (ru->rut == RU_TYPE_PI_GC) {
-						ruh->pi_gc_ruids[rgid] = get_next_free_ruid(ssd, rum);
+						ruh->pi_gc_ruids[rgid] = get_next_free_ruid(ssd, rum, ruhid);
 						rum->rus[ruh->pi_gc_ruids[rgid]].rut = RU_TYPE_PI_GC;
 					}
 					else {
 						// 若是正常写的ru完了，就要更新ruh当前指向的ru
-						ruh->cur_ruids[rgid] = get_next_free_ruid(ssd, rum);
+						ruh->cur_ruids[rgid] = get_next_free_ruid(ssd, rum, ruhid);
 						rum->rus[ruh->cur_ruids[rgid]].rut = RU_TYPE_NORMAL;
 					} 
 					check_addr(ru->wp.blk, spp->blks_per_pl);
@@ -1320,15 +1374,8 @@ static void output_info_log(struct ssd *ssd) {
     fp_wa = fopen(path2wa, "a+");
     fprintf(fp_wa, "WA=%.3f, util: %.1f(GB), pages from Host: %"PRIu64", pages from GC: %"PRIu64", pages from WL: %"PRIu64", read retry: %"PRIu64", bad_ru_cnt = %d, pages_from_host_read=%"PRIu64", host_read_block=%"PRIu64", host_write_block=%"PRIu64"\n", wa, util*4.0/1024/1024, (ssd->sp).pages_from_host, (ssd->sp).pages_from_gc, (ssd->sp).pages_from_wl, (ssd->sp).read_retry, rum->bad_ru_cnt, (ssd->sp).pages_from_host_read, (ssd->sp).host_read_block, (ssd->sp).host_write_block);
     fclose(fp_wa);
-    (ssd->sp).pages_from_gc = 0;
-    (ssd->sp).pages_from_host = 0;
-    (ssd->sp).pages_from_wl = 0;
-    (ssd->sp).pages_from_host_read = 0;
-    (ssd->sp).host_read_block = 0;
-    (ssd->sp).host_write_block = 0;
 
     ftl_log("Free_ru_cnt = %d, util: %.1f(GB), full_ru_cnt = %d, victim_ru_cnt = %d, bad_ru_cnt = %d, read_retry_cnt=%"PRIu64", pages_from_host_read=%"PRIu64", host_read_block=%"PRIu64", host_write_block=%"PRIu64"\n",rum->free_ru_cnt, util*4.0/1024/1024, rum->full_ru_cnt, rum->victim_ru_cnt, rum->bad_ru_cnt, (ssd->sp).read_retry, (ssd->sp).pages_from_host_read, (ssd->sp).host_read_block, (ssd->sp).host_write_block);
-    (ssd->sp).read_retry = 0;
 
     FILE *fp= fopen(path2ec, "a+");
     if (fp != NULL) {
@@ -1422,8 +1469,8 @@ static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, NvmeRequest *re
 	ruhid = victim_ru->ruhid; 
 	ruh = &ns->endgrp->fdp.ruhs[ruhid];	
 
-    ftl_log("GC-ing line:%d,ipc=%d,victim=%d,full=%d,free=%d\n", ppa.g.blk,
-              victim_ru->ipc, ssd->rums[rgid].victim_ru_cnt, ssd->rums[rgid].full_ru_cnt, ssd->rums[rgid].free_ru_cnt); 
+    ftl_log("GC-ing line:%d,ipc=%d,victim=%d,full=%d,free=%d,ruhid=%d\n", ppa.g.blk,
+              victim_ru->ipc, ssd->rums[rgid].victim_ru_cnt, ssd->rums[rgid].full_ru_cnt, ssd->rums[rgid].free_ru_cnt, ruhid); 
 
 #ifdef FDP_DEBUG
 	printf("rgid: %d\n", rgid);
@@ -1451,7 +1498,8 @@ static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, NvmeRequest *re
 		} 
 
 		lunp->gc_endtime = lunp->next_lun_avail_time;
-	} 
+	}
+	victim_ru->erase_cnt += spp->gap;
 
 	if (ruh->ruht == NVME_RUHT_INITIALLY_ISOLATED && log_event(ruh, FDP_EVT_MEDIA_REALLOC)) {
 		struct nvme_fdp_event_realloc mr;
@@ -1484,19 +1532,36 @@ static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, NvmeRequest *re
 	victim_ru->wp.pg = 0;
 	victim_ru->ipc = 0;
 	victim_ru->vpc = 0;
+	
+	// 统计当前有效页数
+	struct ru* tmp;
+	double util = 0.0;
+	for (int i = 0; i < rum->tt_rus; i++) {
+		tmp = &rum->rus[i];
+		util += tmp->vpc;
+	}
 
     // 块到达磨损上限，弃用整个超级块
-    if (victim_ru->erase_cnt > ssd->sp.endurance) {
+    if (victim_ru->erase_cnt >= ssd->sp.endurance) {
 		QTAILQ_INSERT_TAIL(&rum->bad_ru_list, victim_ru, entry);
 		rum->bad_ru_cnt++;
 		ftl_log("Ru %d becomes bad!\n", victim_ru->id);
-        if (((rum->bad_ru_cnt * spp->secs_per_ru) >=  spp->op * spp->tt_secs) || (rum->bad_ru_cnt >= (spp->tt_rus - spp->gc_thres_rus_high))) {
+        if ((spp->tt_secs - rum->bad_ru_cnt * spp->secs_per_line <= util * spp->secs_per_pg) || (rum->bad_ru_cnt >= (spp->tt_rus - spp->gc_thres_rus_high))) {
 			output_info_log(ssd);
             ftl_err("SSD reaches its end of the life!\n");
             abort();
         }
+
+		if (ssd->cv_moderate == 0) {
+            double eop = ((rum->tt_rus - rum->bad_ru_cnt)*ssd->sp.pgs_per_line - util)/util;
+			ftl_log("eop:%lf\n", eop);
+            //if (eop < ssd->sp.op) {
+            if (eop < 1) {    
+				ssd->cv_moderate = 1;
+				output_info_log(ssd);
+            }
+		}
     } else {
-		victim_ru->erase_cnt += spp->gap;
     	QTAILQ_INSERT_TAIL(&rum->free_ru_list, victim_ru, entry);
 		rum->free_ru_cnt++;
     }

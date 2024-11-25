@@ -256,13 +256,13 @@ static void ssd_init_fdp_ruhtbl(struct FemuCtrl *n, struct ssd *ssd)
 	} 
 	
 	// 每个rg指定一个ii_gc的ru，不需要同ruh
-	for (int i = 0; i < endgrp->fdp.nrg; i++) {
-		rum = &ssd->rums[i];
-		rum->ii_gc_ruid = get_next_free_ruid(ssd, rum);
-		rum->rus[rum->ii_gc_ruid].rut = RU_TYPE_II_GC;
-	}
+	// for (int i = 0; i < endgrp->fdp.nrg; i++) {
+	// 	rum = &ssd->rums[i];
+	// 	rum->ii_gc_ruid = get_next_free_ruid(ssd, rum);
+	// 	rum->rus[rum->ii_gc_ruid].rut = RU_TYPE_II_GC;
+	// }
 
-	/*
+	
 	for (int i = 0; i < endgrp->fdp.nrg; i++) {
 		int pi_gc_ruid;
 		rum = &ssd->rums[i]; 
@@ -272,7 +272,7 @@ static void ssd_init_fdp_ruhtbl(struct FemuCtrl *n, struct ssd *ssd)
 			ssd->ruhtbl[j].pi_gc_ruids[i] = pi_gc_ruid;
 			rum->rus[pi_gc_ruid].rut = RU_TYPE_PI_GC;
 		} 
-	} */
+	}
 }																
 
 static void ssd_init_write_pointer(struct ssd *ssd)
@@ -884,9 +884,9 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
 			rber /= 2.0;
 			read_retry += 1;
 		}
-		read_retry = 0;
+		
 		//ftl_log("rr:%d\n", read_retry);
-		spp->read_retry += read_retry;
+		spp->read_retry += read_retry + 1;
         lun->next_lun_avail_time = nand_stime + spp->pg_rd_lat * (1 + read_retry);
         lat = lun->next_lun_avail_time - cmd_stime;
 #if 0
@@ -1473,7 +1473,7 @@ static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, NvmeRequest *re
 	victim_ru->vpc = 0;
 
     // 块到达磨损上限，弃用整个超级块
-    if (0) {
+    if (victim_ru->erase_cnt > ssd->sp.endurance) {
 		QTAILQ_INSERT_TAIL(&rum->bad_ru_list, victim_ru, entry);
 		rum->bad_ru_cnt++;
 		ftl_log("Ru %d becomes bad!\n", victim_ru->id);

@@ -152,6 +152,7 @@ static inline void victim_ru_set_pos(void *a, size_t pos)
     ((struct ru *)a)->pos = pos;
 }																	
 
+// 每个rg一个rum来管理free、victim ru list等
 static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 {
 	struct ssdparams *spp = &ssd->sp;
@@ -169,7 +170,7 @@ static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 		rum->rus = g_malloc0(sizeof(struct ru) * rum->tt_rus);
 
 		QTAILQ_INIT(&rum->free_ru_list);
-		rum->victim_ru_pq = pqueue_init(spp->tt_blks, victim_ru_cmp_pri,
+		rum->victim_ru_pq = pqueue_init(spp->tt_rus, victim_ru_cmp_pri,
             victim_ru_get_pri, victim_ru_set_pri,
             victim_ru_get_pos, victim_ru_set_pos);
 		QTAILQ_INIT(&rum->full_ru_list);
@@ -191,21 +192,10 @@ static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 
 			ru->rut = RU_TYPE_NORMAL;
 
-			// 序号为 0 1 2 3的RU分别被0 1 2 3的RUH指向
-			if (j < MAX_RUHS)
-				ru->ruhid = j;
-
-			for (int k = 0; k < RG_DEGREE; k++) {
-				int cur_ch = ru->wp.ch + k / spp->luns_per_ch;
-				int cur_lun = (ru->wp.lun + k) % spp->luns_per_ch;
-
-				ru->blks[k] = &ssd->ch[cur_ch].lun[cur_lun].pl[0].blk[j]; 
-			} 
-
 			QTAILQ_INSERT_TAIL(&rum->free_ru_list, ru, entry);
 			rum->free_ru_cnt++;
 		}
-
+		//printf("free_ru_cnt:%d\n", rum->free_ru_cnt);
 		ftl_assert(rum->free_ru_cnt == rum->tt_rus);
 		rum->victim_ru_cnt = 0;
 		rum->full_ru_cnt = 0; 
@@ -299,6 +289,7 @@ static int get_next_free_ruid(struct ssd *ssd, struct fdp_ru_mgmt *rum, int ruhi
 	QTAILQ_REMOVE(&rum->free_ru_list, ru_tmp, entry);
 	rum->free_ru_cnt--;
 
+	ftl_log("ru_id:%d ruhid:%d\n", ru_tmp->id, ruhid);
 	return ru_tmp->id; 
 }
 
@@ -313,13 +304,14 @@ static void ssd_init_fdp_ruhtbl(struct FemuCtrl *n, struct ssd *ssd)
 	ssd->ruhtbl = g_malloc0(sizeof(struct ruh) * endgrp->fdp.nruh); 
 	for (int i = 0; i < endgrp->fdp.nruh; i++) {
 		ruh = &ssd->ruhtbl[i];
-		ruh->ruht = endgrp->fdp.ruhs[i].ruht;
+		ruh->ruht = NVME_RUHT_PERSISTENTLY_ISOLATED;
 		// 当前指向的ru，每个rg一个
 		ruh->cur_ruids = g_malloc0(sizeof(int) * endgrp->fdp.nrg);
 		ruh->pi_gc_ruids = g_malloc0(sizeof(int) * endgrp->fdp.nrg);
 		for (int j = 0; j < endgrp->fdp.nrg; j++)  {
 			rum = &ssd->rums[j];
 			ruh->cur_ruids[j] = get_next_free_ruid(ssd, rum, i);
+			ftl_log("init ruh %d cur_ruid[%d] = %d\n", i, j, ruh->cur_ruids[j]);
 		} 
 	} 
 	
@@ -436,8 +428,6 @@ static void ssd_advance_write_pointer(struct ssd *ssd)
         }
     }
 }
-
-// #define SMALL_RG
 static void ssd_advance_fdp_write_pointer(struct ssd *ssd, uint16_t rgid, int lpn, uint16_t ruhid, bool for_gc)
 {
 	struct ssdparams *spp = &ssd->sp;
@@ -446,6 +436,7 @@ static void ssd_advance_fdp_write_pointer(struct ssd *ssd, uint16_t rgid, int lp
 	int max_ch = (rgid + 1) * (RG_DEGREE / spp->luns_per_ch);
 	int ruid;
 	struct ru *ru = NULL;
+
 	// 若当前是gc_write，则写入的ru是迁移后的ru
 	if (for_gc) {
 		if (ruh->ruht == NVME_RUHT_INITIALLY_ISOLATED) {
@@ -454,8 +445,6 @@ static void ssd_advance_fdp_write_pointer(struct ssd *ssd, uint16_t rgid, int lp
 		else if (ruh->ruht == NVME_RUHT_PERSISTENTLY_ISOLATED) {
 			ruid = ruh->pi_gc_ruids[rgid];
 		}
-		else if (ruh->ruht == NVME_RUHT_PERSISTENTLY_ISOLATED_NO_SEPARATED_BLK)
-			ruid = ruh->cur_ruids[rgid];
 		else {
 			if (ssd->gc_cnt[lpn] == 0)
 				ruid = ruh->pi_gc_ruids[rgid];
@@ -467,125 +456,59 @@ static void ssd_advance_fdp_write_pointer(struct ssd *ssd, uint16_t rgid, int lp
 		ruid = ruh->cur_ruids[rgid];
 
 	ru = &rum->rus[ruid]; 
-
-#ifdef SMALL_RG
-	if (RG_DEGREE > spp->luns_per_ch)
-	{ 
-#endif
-		check_addr(ru->wp.ch, max_ch);
-		ru->wp.ch++;
-		if (ru->wp.ch == max_ch) {
-			ru->wp.ch = rgid * (RG_DEGREE / spp->luns_per_ch);
-			check_addr(ru->wp.lun, spp->luns_per_ch);
-			ru->wp.lun++;
-			/* in this case, we should go to next lun */
-			if (ru->wp.lun == spp->luns_per_ch) {
-				ru->wp.lun = 0;
-				/* go to next page in the block */
-				check_addr(ru->wp.pg, spp->pgs_per_blk);
-				ru->wp.pg++;
-				if (ru->wp.pg == spp->pgs_per_blk) {
-					ru->wp.pg = 0;
-					if (ru->vpc == spp->pgs_per_ru) {
-						ftl_assert(ru->ipc == 0);
-						QTAILQ_INSERT_TAIL(&rum->full_ru_list, ru, entry);
-						rum->full_ru_cnt++;
-					} else {
-						ftl_assert(ru->vpc >= 0 && ru->vpc < spp->pgs_per_ru);
-						ftl_assert(ru->ipc > 0);
-						pqueue_insert(rum->victim_ru_pq, ru);
-						rum->victim_ru_cnt++;
-					}
-
-					check_addr(ru->wp.blk, spp->blks_per_pl); 
-					// 存下写入该ru的ruhid，方便后续找迁移的ru
-					ru->ruhid = ruhid; 
-					// 若当前是迁移后的ru写完了，则要新找一个存放迁移数据的ru
-					if (ru->rut == RU_TYPE_II_GC) {
-						rum->ii_gc_ruid = get_next_free_ruid(ssd, rum, ruhid);
-						rum->rus[rum->ii_gc_ruid].rut = RU_TYPE_II_GC;
-					}
-					else if (ru->rut == RU_TYPE_PI_GC) {
-						ruh->pi_gc_ruids[rgid] = get_next_free_ruid(ssd, rum, ruhid);
-						rum->rus[ruh->pi_gc_ruids[rgid]].rut = RU_TYPE_PI_GC;
-					}
-					else {
-						// 若是正常写的ru完了，就要更新ruh当前指向的ru
-						ruh->cur_ruids[rgid] = get_next_free_ruid(ssd, rum, ruhid);
-						rum->rus[ruh->cur_ruids[rgid]].rut = RU_TYPE_NORMAL;
-					} 
-					check_addr(ru->wp.blk, spp->blks_per_pl);
-					ftl_assert(ru->wp.pg == 0);
-					ftl_assert(ru->wp.lun == 0);
-					ftl_assert(ru->wp.ch == rgid * (RG_DEGREE / spp->luns_per_ch));
-					ftl_assert(ru->wp.pl == 0);
-				}
-			}
-		} 
-#ifdef SMALL_RG
-	} 
-#endif
-
-#ifdef SMALL_RG
-	/* Case that an RG is included in one channel */
-	else 
-	{
-		check_addr(ru->wp.lun, spp->luns_per_ch); 
+	check_addr(ru->wp.ch, max_ch);
+	ru->wp.ch++;
+	if (ru->wp.ch == max_ch) {
+		ru->wp.ch = rgid * (RG_DEGREE / spp->luns_per_ch);
+		check_addr(ru->wp.lun, spp->luns_per_ch);
 		ru->wp.lun++;
-		/* move to next page */
-		if (ru->wp.lun % RG_DEGREE == 0)
-		{
+		/* in this case, we should go to next lun */
+		if (ru->wp.lun == spp->luns_per_ch) {
 			ru->wp.lun = 0;
-			check_addr(ru->wp.pg, spp->pgs_per_ch);
+			/* go to next page in the block */
+			check_addr(ru->wp.pg, spp->pgs_per_blk);
 			ru->wp.pg++;
-			if (ru->wp.pg == spp->pgs_per_blk)
-			{
+			if (ru->wp.pg == spp->pgs_per_blk) {
 				ru->wp.pg = 0;
-				/* move current ru to {victim,full} ru list */
-				if (ru->vpc == spp->pgs_per_blk * RG_DEGREE)
-				{
-					/* all pgs are still valid, move to full ru list */
+				if (ru->vpc == spp->pgs_per_ru) {
 					ftl_assert(ru->ipc == 0);
 					QTAILQ_INSERT_TAIL(&rum->full_ru_list, ru, entry);
 					rum->full_ru_cnt++;
-				}
-				else
-				{
-					/* there must be some invalid pages in this ru */
-					ftl_assert(ru->vpn >= 0 && ru->vpc < RG_DEGREE * spp->pgs_per_blk);
+				} else {
+					ftl_assert(ru->vpc >= 0 && ru->vpc < spp->pgs_per_ru);
 					ftl_assert(ru->ipc > 0);
 					pqueue_insert(rum->victim_ru_pq, ru);
 					rum->victim_ru_cnt++;
 				}
-				/* current ru is used up, pick another empty ru */ 
-				ru->ruhid = ruhid;
+
+				check_addr(ru->wp.blk, spp->blks_per_pl); 
+				// 存下写入该ru的ruhid，方便后续找迁移的ru
+				ru->ruhid = ruhid; 
+				// 若当前是迁移后的ru写完了，则要新找一个存放迁移数据的ru
 				if (ru->rut == RU_TYPE_II_GC) {
-					rum->ii_gc_ruid = get_next_free_ruid(ssd, rum);
+					rum->ii_gc_ruid = get_next_free_ruid(ssd, rum, ruhid);
 					rum->rus[rum->ii_gc_ruid].rut = RU_TYPE_II_GC;
 				}
 				else if (ru->rut == RU_TYPE_PI_GC) {
-					ruh->pi_gc_ruids[rgid] = get_next_free_ruid(ssd, rum);
+					ruh->pi_gc_ruids[rgid] = get_next_free_ruid(ssd, rum, ruhid);
 					rum->rus[ruh->pi_gc_ruids[rgid]].rut = RU_TYPE_PI_GC;
 				}
 				else {
-					/* update ruhtbl */
-					ruh->cur_ruids[rgid] = get_next_free_ruid(ssd, rum);
+					// 若是正常写的ru完了，就要更新ruh当前指向的ru
+					ruh->cur_ruids[rgid] = get_next_free_ruid(ssd, rum, ruhid);
 					rum->rus[ruh->cur_ruids[rgid]].rut = RU_TYPE_NORMAL;
 				} 
 				check_addr(ru->wp.blk, spp->blks_per_pl);
-				/* make sure we are starting from page 0 in the ru */
 				ftl_assert(ru->wp.pg == 0);
 				ftl_assert(ru->wp.lun == 0);
-				/* TODO: assume # of pl_per_lun is 1, fix later */
+				ftl_assert(ru->wp.ch == rgid * (RG_DEGREE / spp->luns_per_ch));
 				ftl_assert(ru->wp.pl == 0);
 			}
 		}
-	}
-#endif
-}																					
-
+	} 
+}
 static struct ppa fdp_get_new_page(struct ssd *ssd, uint16_t rgid, 
-		int lpn, uint16_t ruhid, bool for_gc) //update
+		int lpn, uint16_t ruhid, bool for_gc)
 {
 	struct fdp_ru_mgmt *rum = &ssd->rums[rgid];
 	struct ruh* ruh = &ssd->ruhtbl[ruhid];
@@ -597,9 +520,6 @@ static struct ppa fdp_get_new_page(struct ssd *ssd, uint16_t rgid,
 			ruid = rum->ii_gc_ruid;
 		else if (ruh->ruht == NVME_RUHT_PERSISTENTLY_ISOLATED)
 			ruid = ruh->pi_gc_ruids[rgid];
-		else if (ruh->ruht == NVME_RUHT_PERSISTENTLY_ISOLATED_NO_SEPARATED_BLK) {
-			ruid = ruh->cur_ruids[rgid];
-		}
 		else { 
 			if (ssd->gc_cnt[lpn] == 0)
 				ruid = ruh->pi_gc_ruids[rgid];
@@ -677,10 +597,6 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->pgs_per_lun = spp->pgs_per_pl * spp->pls_per_lun;
     spp->pgs_per_ch = spp->pgs_per_lun * spp->luns_per_ch;
     spp->tt_pgs = spp->pgs_per_ch * spp->nchs;
-#ifdef DEVICE_UTIL_DEBUG
-	spp->tt_valid_pgs = 0;
-#endif
-
     spp->blks_per_lun = spp->blks_per_pl * spp->pls_per_lun;
     spp->blks_per_ch = spp->blks_per_lun * spp->luns_per_ch;
     spp->tt_blks = spp->blks_per_ch * spp->nchs;
@@ -809,12 +725,6 @@ void ssd_init(FemuCtrl *n)
     struct ssdparams *spp = &ssd->sp;
 
     ftl_assert(ssd);
-#ifdef UPDATE_FREQ
-	/*for (int i = 0; i < 4; i++)
-		for (int j = 0; j < 24; j++)
-			ssd->ten[i][j] = 0;*/
-	memset(ssd->ten, 0x00, NR_TENANTS * sizeof(struct tenant));
-#endif
 
     ssd_init_params(spp, n);
 
@@ -830,17 +740,12 @@ void ssd_init(FemuCtrl *n)
     /* initialize rmap */
     ssd_init_rmap(ssd);
 
-#ifdef WAF_TEST
-	n->host_writes = 0;
-	n->gc_writes = 0;
-#endif
-
-	ssd->gc_cnt = g_malloc0(sizeof(int) * spp->tt_pgs);  // update
+	ssd->gc_cnt = g_malloc0(sizeof(int) * spp->tt_pgs);
 
     /* initialize all the lines */
     ssd_init_lines(ssd);
 
-/* initialize write pointer, this is how we allocate new pages for writes */
+	/* initialize write pointer, this is how we allocate new pages for writes */
     ssd_init_write_pointer(ssd);
 
 	ssd_init_fdp_ru_mgmts(ssd); 						
@@ -1035,7 +940,7 @@ static void mark_page_invalid(struct ssd *ssd, struct ppa *ppa, uint16_t rgid)
     ftl_assert(blk->vpc > 0 && blk->vpc <= spp->pgs_per_blk);
     blk->vpc--;
 
-	if (ssd->fdp_enabled)	//update
+	if (ssd->fdp_enabled)
 	{ 
 		/* update corresponding ru status */
 		ru = get_ru(ssd, ppa);
@@ -1288,6 +1193,7 @@ static struct ru *select_victim_ru(struct ssd *ssd, bool force, int rgid)
     rum->victim_ru_cnt--;
 
     /* victim_ru is a danggling node now */
+	ftl_log("victim_ru: %d\n", victim_ru->id);
     return victim_ru;
 }
 
@@ -1469,16 +1375,8 @@ static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, NvmeRequest *re
 	ruhid = victim_ru->ruhid; 
 	ruh = &ns->endgrp->fdp.ruhs[ruhid];	
 
-    ftl_log("GC-ing line:%d,ipc=%d,victim=%d,full=%d,free=%d,ruhid=%d\n", ppa.g.blk,
-              victim_ru->ipc, ssd->rums[rgid].victim_ru_cnt, ssd->rums[rgid].full_ru_cnt, ssd->rums[rgid].free_ru_cnt, ruhid); 
-
-#ifdef FDP_DEBUG
-	printf("rgid: %d\n", rgid);
-	printf("ruhid: %d\n", ruhid);
-	printf("victim_ru id: %d\n", victim_ru->id);
-	printf("victim_ru->ipc: %d\n", victim_ru->ipc);
-	printf("victim_ru->vpc: %d\n", victim_ru->vpc);
-#endif 
+    ftl_log("GC-ing ru:%d,ipc=%d,vpc=%d,victim=%d,full=%d,free=%d,bad=%d,ruhid=%d\n", victim_ru->id,
+              victim_ru->ipc, victim_ru->vpc, rum->victim_ru_cnt, rum->full_ru_cnt, rum->free_ru_cnt, rum->bad_ru_cnt, ruhid); 
 
 	for (int lunidx = start_lunidx; lunidx < start_lunidx + RG_DEGREE; lunidx++) {
 		ppa.g.ch = lunidx / spp->luns_per_ch;
@@ -1515,15 +1413,25 @@ static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, NvmeRequest *re
 		e->rgid = cpu_to_le16(rgid);
 		e->ruhid = cpu_to_le16(ruhid);
 	}
-
-#ifdef WAF_TEST
-	req->ns->ctrl->gc_writes += gc_pgs * 8;
-#endif
-#ifdef DEVICE_UTIL_DEBUG
-	spp->tt_valid_pgs += gc_pgs;
-#endif
-
 	ftl_log("ru:%d erase_cnt:%d\n", victim_ru->id, victim_ru->erase_cnt);
+
+	// 统计当前有效页数
+	struct ru* tmp;
+	double util = 0.0;
+	for (int i = 0; i < rum->tt_rus; i++) {
+		tmp = &rum->rus[i];
+		util += tmp->vpc;
+		//ftl_log("ru:%d vpc:%d\n", i, tmp->vpc);
+	}
+	ftl_log("valid page:%lf\n", util);
+	if(util == 0) {
+		for (int i = 0; i < rum->tt_rus; i++) {
+			tmp = &rum->rus[i];
+			util += tmp->vpc;
+			ftl_log("ru:%d vpc:%d\n", i, tmp->vpc);
+		}
+	}
+
 	/* reset wp of victim ru */
 	victim_ru->wp.ch = start_lunidx / spp->luns_per_ch;
 	victim_ru->wp.lun = start_lunidx % spp->luns_per_ch;
@@ -1532,15 +1440,8 @@ static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, NvmeRequest *re
 	victim_ru->wp.pg = 0;
 	victim_ru->ipc = 0;
 	victim_ru->vpc = 0;
+	// victim_ru->pos = 0;
 	
-	// 统计当前有效页数
-	struct ru* tmp;
-	double util = 0.0;
-	for (int i = 0; i < rum->tt_rus; i++) {
-		tmp = &rum->rus[i];
-		util += tmp->vpc;
-	}
-
     // 块到达磨损上限，弃用整个超级块
     if (victim_ru->erase_cnt >= ssd->sp.endurance) {
 		QTAILQ_INSERT_TAIL(&rum->bad_ru_list, victim_ru, entry);
@@ -1603,18 +1504,6 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         sublat = ssd_advance_status(ssd, &ppa, &srd);
         maxlat = (sublat > maxlat) ? sublat : maxlat;
     }
-
-#ifdef UPDATE_FREQ
-	if (lba == 1000) {
-		for (int i = 0; i < NR_TENANTS; i++)
-			for (int j = 0; j < LGROUPS_PER_TENANT; j++)
-				printf("tenant: %d lgroup: %d cnt: %d\n", i, j, ssd->ten[i].update_cnt[j]);
-	}
-#endif
-#ifdef DEVICE_UTIL_DEBUG
-	// if (lba == 2000) 
-	// 	printf("util: %lf\n", (double) spp->tt_valid_pgs / spp->tt_pgs);
-#endif
     return maxlat; 
 }
 
@@ -1633,7 +1522,7 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     uint64_t curlat = 0, maxlat = 0;
     int r;
 
-	NvmeRwCmd *rw = (NvmeRwCmd*)&req->cmd;				//update~
+	NvmeRwCmd *rw = (NvmeRwCmd*)&req->cmd;
 	NvmeNamespace *ns = req->ns;
 	NvmeEnduranceGroup *endgrp = ns->endgrp;
 	bool fdp_enabled = ssd->fdp_enabled;
@@ -1659,14 +1548,7 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 	if (fdp_enabled) {
 		/* perform GC here until !should_fdp_gc(ssd, rgid) */
 		while (should_fdp_gc_high(ssd, rgid)) {
-#ifdef FDP_DEBUG
-			printf("do_fdp_gc() called in high\n");
-#endif
-			spp->tt_valid_pgs -= spp->pgs_per_ru;
 			r = do_fdp_gc(ssd, rgid, true, req);
-			ftl_assert(spp->tt_valid_pgs >= 0);
-#ifdef DEVICE_UTIL_DEBUG
-#endif
 			if (r == -1)
 				break;
 		}
@@ -1684,15 +1566,6 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         ppa = get_maptbl_ent(ssd, lpn);
         if (mapped_ppa(&ppa)) {
             /* update old page information first */
-#ifdef UPDATE_FREQ 
-			int tid = lpn / LPNS_PER_TENANT; 					// tenant id
-			int lgroup_offset = (lpn % (int)LPNS_PER_TENANT) / LPNS_PER_LGROUP;
-			/*
-			printf("lpn: %ld\n", lpn);
-			printf("tid: %d\n", tid);
-			printf("lgroup_offset: %d\n", lgroup_offset);*/
-			ssd->ten[tid].update_cnt[lgroup_offset]++;
-#endif
 			uint16_t old_rgid = (ppa.g.ch * spp->luns_per_ch + ppa.g.lun) / RG_DEGREE;
 			mark_page_invalid(ssd, &ppa, old_rgid); 
             set_rmap_ent(ssd, INVALID_LPN, &ppa);
@@ -1713,10 +1586,6 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         set_rmap_ent(ssd, lpn, &ppa);
 
         mark_page_valid(ssd, &ppa);
-#ifdef DEVICE_UTIL_DEBUG
-		spp->tt_valid_pgs += 1;
-		ftl_assert(spp->tt_valid_pgs <= spp->tt_pgs);
-#endif
 
         /* need to advance the write pointer here */
 		if (fdp_enabled)  {

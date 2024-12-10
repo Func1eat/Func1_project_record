@@ -8,19 +8,6 @@
 #define INVALID_LPN     (~(0ULL))
 #define UNMAPPED_PPA    (~(0ULL))
 
-
-//#define UPDATE_FREQ
-#define DEVICE_UTIL_DEBUG
-
-#ifdef UPDATE_FREQ 
-#define NR_TENANTS (2)
-#define LGROUPS_PER_TENANT (36)
-#define TOTAL_LPN (7730944 * 0.72)
-#define TOTAL_LGROUPS ((NR_TENANTS) * (LGROUPS_PER_TENANT))
-#define LPNS_PER_TENANT ((TOTAL_LPN) / (NR_TENANTS))
-#define LPNS_PER_LGROUP ((TOTAL_LPN) / (TOTAL_LGROUPS))
-#endif
-
 enum {
     NAND_READ =  0,
     NAND_WRITE = 1,
@@ -261,7 +248,6 @@ typedef struct ru {
 		int blk;
 		int pg;
 	} wp;
-	struct nand_block* blks[RG_DEGREE];
 	int ipc;
 	int vpc;
 	QTAILQ_ENTRY(ru) entry;		/* in either {free, victim, full} list */
@@ -293,12 +279,6 @@ struct fdp_ru_mgmt {
 	int ii_gc_ruid;			/* recalim unit for initially isolated gc */
 };							
 
-#ifdef UPDATE_FREQ 
-struct tenant {
-	int update_cnt[LGROUPS_PER_TENANT];
-};
-#endif
-
 struct ssd {
     char *ssdname;
     struct ssdparams sp;
@@ -313,10 +293,6 @@ struct ssd {
 	int fdp_enabled;
 
   int cv_moderate;
-
-#ifdef UPDATE_FREQ
-	struct tenant ten[4];
-#endif
     /* lockless ring for communication with NVMe IO thread */
     struct rte_ring **to_ftl;
     struct rte_ring **to_poller;

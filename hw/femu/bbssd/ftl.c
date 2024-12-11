@@ -218,9 +218,9 @@ static int get_next_free_ruid(struct ssd *ssd, struct fdp_ru_mgmt *rum, int ruhi
 		abort();
 	}
 	
-	int hottest = retru->erase_cnt;
 	struct ru *ru_tmp = retru;
-
+	int hottest = retru->erase_cnt;
+	
 	//热读
 	if (ruhid == 0) {
 		if (ssd->cv_moderate == 1) {
@@ -274,7 +274,7 @@ static int get_next_free_ruid(struct ssd *ssd, struct fdp_ru_mgmt *rum, int ruhi
 		}
 	}
 
-	
+	// 动态磨损均衡，优先选择最年轻的RU进行写入
   	// for (int i = 1; i < rum->free_ru_cnt; i++) {
 	// 	retru = QTAILQ_NEXT(retru, entry);
 	// 	if (retru->erase_cnt < hottest) {
@@ -282,10 +282,7 @@ static int get_next_free_ruid(struct ssd *ssd, struct fdp_ru_mgmt *rum, int ruhi
 	// 		ru_tmp = retru;
 	// 	}
 	// }
-    
-#ifdef FDP_DEBUG 
-	printf("new ru: %d\n", retru->id);
-#endif
+
 	QTAILQ_REMOVE(&rum->free_ru_list, ru_tmp, entry);
 	rum->free_ru_cnt--;
 
@@ -1456,8 +1453,8 @@ static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, NvmeRequest *re
 		if (ssd->cv_moderate == 0) {
             double eop = ((rum->tt_rus - rum->bad_ru_cnt)*ssd->sp.pgs_per_line - util)/util;
 			ftl_log("eop:%lf\n", eop);
-            //if (eop < ssd->sp.op) {
-            if (eop < 1) {    
+            if (eop < ssd->sp.op) {
+            //if (eop < 1) {    
 				ssd->cv_moderate = 1;
 				output_info_log(ssd);
             }

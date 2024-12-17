@@ -450,7 +450,7 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
 	/* FIXME: Identity relation for easy implementation */
 	for (int i = 0; i < ns->fdp.nphs; i++)
-		ns->fdp.phs[i] = i;														//~update
+		ns->fdp.phs[i] = i;													
 
     return 0;
 }
@@ -777,6 +777,8 @@ static Property femu_props[] = {
     DEFINE_PROP_INT32("gc_thres_pcent_high", FemuCtrl, bb_params.gc_thres_pcent_high, 95),
     DEFINE_PROP_INT32("fdp_enabled", FemuCtrl, bb_params.fdp_enabled, 1),
     DEFINE_PROP_INT32("cv_enabled", FemuCtrl, bb_params.cv_enabled, 1),
+    DEFINE_PROP_INT32("slc_op", FemuCtrl, bb_params.slc_op, 25),
+    DEFINE_PROP_INT32("qlc_op", FemuCtrl, bb_params.qlc_op, 75),
     DEFINE_PROP_END_OF_LIST(),
 };
 

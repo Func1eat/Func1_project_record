@@ -9,13 +9,32 @@
 #define UNMAPPED_PPA    (~(0ULL))
 
 enum {
-    NAND_READ =  0,
-    NAND_WRITE = 1,
-    NAND_ERASE = 2,
-
-    NAND_READ_LATENCY = 40000,
-    NAND_PROG_LATENCY = 200000,
-    NAND_ERASE_LATENCY = 2000000,
+    NAND_SLC_READ = 0,
+    NAND_SLC_PROG = 1,
+    NAND_SLC_ERASE = 2,
+    NAND_QLC_READ_L = 3,
+    NAND_QLC_READ_CL = 4,
+    NAND_QLC_READ_CU = 5,
+    NAND_QLC_READ_U = 6,
+    NAND_QLC_PROG_L = 7,
+    NAND_QLC_PROG_CL = 8,
+    NAND_QLC_PROG_CU = 9,
+    NAND_QLC_PROG_U = 10,
+	NAND_QLC_PROG_TOTAL = 11,
+    NAND_QLC_ERASE = 12,
+    NAND_SLC_READ_LAT = 30000,
+    NAND_SLC_PROG_LAT = 160000,
+    NAND_SLC_ERASE_LAT = 3000000,
+    NAND_QLC_READ_L_LAT = 48000,
+    NAND_QLC_READ_CL_LAT = 64000,
+    NAND_QLC_READ_CU_LAT = 80000,
+    NAND_QLC_READ_U_LAT = 96000,
+    NAND_QLC_PROG_L_LAT = 850000,
+    NAND_QLC_PROG_CL_LAT = 2300000,
+    NAND_QLC_PROG_CU_LAT = 3750000,
+    NAND_QLC_PROG_U_LAT = 5200000,
+	NAND_QLC_PROG_TOTAL_LAT = 1000000,
+    NAND_QLC_ERASE_LAT = 3500000,
 };
 
 enum {
@@ -90,6 +109,7 @@ struct nand_block {
     int vpc; /* valid page count */
     int erase_cnt;
     int wp; /* current write pointer */
+	int mode; // slc = 0  qlc = 1
 };
 
 struct nand_plane {
@@ -133,8 +153,14 @@ struct ssdparams {
     int gc_thres_lines;
     double gc_thres_pcent_high;
     int gc_thres_lines_high;
-	int gc_thres_rus;
-    int gc_thres_rus_high;
+	int gc_thres_rus_slc;
+	int gc_thres_rus_qlc;
+    int gc_thres_rus_high_slc;
+    int gc_thres_rus_high_qlc;
+
+	int slc_op;
+	int qlc_op;
+
     bool enable_gc_delay;
 
     /* below are all calculated values */
@@ -174,7 +200,9 @@ struct ssdparams {
     int tt_luns;      /* total # of LUNs in the SSD */
 
     // 磨损相关
-    int endurance;
+    int endurance_slc;
+	int endurance_qlc;
+
     double op;
 
     // ecc相关
@@ -256,6 +284,7 @@ typedef struct ru {
 	int rut;					/* ru type: normal, ii_gc, pi_gc */
 
 	int erase_cnt;
+	int mode;
 } ru; 					
 
 struct ruh {				
@@ -265,7 +294,6 @@ struct ruh {
 };						
 
 struct fdp_ru_mgmt {	
-	struct ru *rus;
 	QTAILQ_HEAD(free_ru_list, ru) free_ru_list;
 	pqueue_t *victim_ru_pq;
     //QTAILQ_HEAD(victim_blk_list, blk) victim_blk_list;
@@ -287,8 +315,10 @@ struct ssd {
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
     struct write_pointer wp;
     struct line_mgmt lm;
-	struct fdp_ru_mgmt *rums; 	/* raclaim unit managements */		
-	struct ruh *ruhtbl;			/* ruh table */						
+	struct ruh *ruhtbl;			/* ruh table */	
+	struct ru *rus;					
+	struct fdp_ru_mgmt *rums_slc; 	/* raclaim unit managements */		
+	struct fdp_ru_mgmt *rums_qlc;
 	int *gc_cnt;				/* for two-level isolation gc */		
 	int fdp_enabled;
 

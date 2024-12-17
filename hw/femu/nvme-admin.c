@@ -819,24 +819,24 @@ static uint16_t nvme_error_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
 /* for gc stat */
 static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
 {
-	struct ssd* ssd = n->ssd;
-	double wa_cur = 0, ra_cur = 0;
-	if (((ssd->sp).pages_from_host - (ssd->sp).pages_from_host_pre) != 0) {
-		wa_cur = ((ssd->sp).pages_from_wl + (ssd->sp).pages_from_gc + (ssd->sp).pages_from_host - (ssd->sp).pages_from_wl_pre - (ssd->sp).pages_from_gc_pre - (ssd->sp).pages_from_host_pre) * 1.0 / ((ssd->sp).pages_from_host - (ssd->sp).pages_from_host_pre);
-	}
-	if (((ssd->sp).pages_from_host_read - (ssd->sp).pages_from_host_read_pre) != 0) {
-		ra_cur = ((ssd->sp).read_retry - (ssd->sp).read_retry_pre) * 1.0 / ((ssd->sp).pages_from_host_read - (ssd->sp).pages_from_host_read_pre);
-	}
+	// struct ssd* ssd = n->ssd;
+	// double wa_cur = 0, ra_cur = 0;
+	// if (((ssd->sp).pages_from_host - (ssd->sp).pages_from_host_pre) != 0) {
+	// 	wa_cur = ((ssd->sp).pages_from_wl + (ssd->sp).pages_from_gc + (ssd->sp).pages_from_host - (ssd->sp).pages_from_wl_pre - (ssd->sp).pages_from_gc_pre - (ssd->sp).pages_from_host_pre) * 1.0 / ((ssd->sp).pages_from_host - (ssd->sp).pages_from_host_pre);
+	// }
+	// if (((ssd->sp).pages_from_host_read - (ssd->sp).pages_from_host_read_pre) != 0) {
+	// 	ra_cur = ((ssd->sp).read_retry - (ssd->sp).read_retry_pre) * 1.0 / ((ssd->sp).pages_from_host_read - (ssd->sp).pages_from_host_read_pre);
+	// }
 
-	(ssd->sp).pages_from_gc_pre = (ssd->sp).pages_from_gc;
-	(ssd->sp).pages_from_wl_pre = (ssd->sp).pages_from_wl;
-	(ssd->sp).pages_from_host_pre = (ssd->sp).pages_from_host;
-	(ssd->sp).pages_from_host_read_pre = (ssd->sp).pages_from_host_read;
-	(ssd->sp).read_retry_pre = (ssd->sp).read_retry;
+	// (ssd->sp).pages_from_gc_pre = (ssd->sp).pages_from_gc;
+	// (ssd->sp).pages_from_wl_pre = (ssd->sp).pages_from_wl;
+	// (ssd->sp).pages_from_host_pre = (ssd->sp).pages_from_host;
+	// (ssd->sp).pages_from_host_read_pre = (ssd->sp).pages_from_host_read;
+	// (ssd->sp).read_retry_pre = (ssd->sp).read_retry;
 
-	FILE *wa_and_ra = fopen("wa_and_ra.log", "a+");
-	fprintf(wa_and_ra, "%lf %lf\n", wa_cur, ra_cur);
-	fclose(wa_and_ra);
+	// FILE *wa_and_ra = fopen("wa_and_ra.log", "a+");
+	// fprintf(wa_and_ra, "%lf %lf\n", wa_cur, ra_cur);
+	// fclose(wa_and_ra);
 
     /***Ziyang: end ***/
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);

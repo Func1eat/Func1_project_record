@@ -34,7 +34,7 @@
 #define NVME_ID_NS_LBAF_DS(ns, lba_index) (ns->id_ns.lbaf[lba_index].lbads)
 #define NVME_ID_NS_LBAF_MS(ns, lba_index) (ns->id_ns.lbaf[lba_index].ms)
 
-#define NVME_FDP_MAX_EVENTS 63			//update~
+#define NVME_FDP_MAX_EVENTS 63
 #define NVME_FDP_MAXPIDS 	128			
 #define NVME_MAX_NAMESPACES 1			
 #define NVME_MAX_ENDGRPS	1			
@@ -42,11 +42,11 @@
 #define RG_DEGREE			64
 #define WAF_TEST
 
-typedef struct NvmeReclaimUnit {		//update~
+typedef struct NvmeReclaimUnit {	
     uint64_t ruamw;
-} NvmeReclaimUnit;						//~update
+} NvmeReclaimUnit;					
 
-typedef struct NvmeRuHandle {			//update~
+typedef struct NvmeRuHandle {	
     uint8_t  ruht;			// initially isolated or persistently isolated
     uint8_t  ruha;			// host specified or controller specified
     uint64_t event_filter;
@@ -55,9 +55,9 @@ typedef struct NvmeRuHandle {			//update~
 
     /* reclaim units indexed by reclaim group */
     NvmeReclaimUnit *rus;
-} NvmeRuHandle;							//~update
+} NvmeRuHandle;	
 
-typedef struct QEMU_PACKED NvmeFdpEvent { //update~
+typedef struct QEMU_PACKED NvmeFdpEvent {
     uint8_t  type;
     uint8_t  flags;
     uint16_t pid;

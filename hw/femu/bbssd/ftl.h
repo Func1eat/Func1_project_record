@@ -40,6 +40,7 @@ enum {
 enum {
     USER_IO = 0,
     GC_IO = 1,
+	WL_IO = 2,
 };
 
 enum {
@@ -205,6 +206,8 @@ struct ssdparams {
 	int endurance_qlc;
 
     double op;
+    int enable_swl; // 是否开启静态磨损均衡
+	int enable_dwl; // 是否开启动态磨损均衡
 
     // ecc相关
     int ecc_corr_str;

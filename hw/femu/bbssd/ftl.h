@@ -289,6 +289,7 @@ typedef struct ru {
 
 struct ruh {				
 	int ruht;					/* ruh type: ii_gc, pi_gc */
+	int mode;                  // ruh指向的介质类型
 	int* cur_ruids;
 	int* pi_gc_ruids;
 };						
@@ -322,7 +323,7 @@ struct ssd {
 	int *gc_cnt;				/* for two-level isolation gc */		
 	int fdp_enabled;
 
-  int cv_moderate;
+	int cv_moderate;
     /* lockless ring for communication with NVMe IO thread */
     struct rte_ring **to_ftl;
     struct rte_ring **to_poller;

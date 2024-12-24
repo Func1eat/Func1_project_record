@@ -6,6 +6,11 @@
 static void *ftl_thread(void *arg);
 static void output_info_log(struct ssd *ssd);
 
+// 获取ruh的模式为slc还是qlc
+static inline int get_ruh_mode(struct ssd *ssd, int ruhid) {
+	return ssd->ruhtbl[ruhid].mode;
+}
+
 static inline bool should_gc(struct ssd *ssd)
 {
     return (ssd->lm.free_line_cnt <= ssd->sp.gc_thres_lines);
@@ -342,8 +347,17 @@ static void ssd_init_fdp_ruhtbl(struct FemuCtrl *n, struct ssd *ssd)
 
 	ssd->fdp_enabled = n->bb_params.fdp_enabled;
 	ssd->ruhtbl = g_malloc0(sizeof(struct ruh) * (endgrp->fdp.nruh)); 
+	
 
-	// RUH前一半分配在slc,后一半分配在qlc
+	// 初始化ruh的mode
+	for (int i = 0; i < endgrp->fdp.nruh; i++) {
+		ruh = &ssd->ruhtbl[i];
+		if (i == 0 || i == 1)
+			ruh->mode = 0; // slc
+		else
+			ruh->mode = 1;
+	}
+
 	for (int i = 0; i < endgrp->fdp.nruh; i++) {
 		ruh = &ssd->ruhtbl[i];
 		ruh->ruht = NVME_RUHT_PERSISTENTLY_ISOLATED;
@@ -351,7 +365,7 @@ static void ssd_init_fdp_ruhtbl(struct FemuCtrl *n, struct ssd *ssd)
 		ruh->cur_ruids = g_malloc0(sizeof(int) * endgrp->fdp.nrg);
 		ruh->pi_gc_ruids = g_malloc0(sizeof(int) * endgrp->fdp.nrg);
 		for (int j = 0; j < endgrp->fdp.nrg; j++)  {
-			if (i < MAX_RUHS / 2) {
+			if (get_ruh_mode(ssd, i) == 0) {
 				rum_slc = &ssd->rums_slc[j];
 				ruh->cur_ruids[j] = get_next_free_ruid(ssd, rum_slc, i);
 				ftl_log("init ruh %d cur_ruid[%d] = %d in slc\n", i, j, ruh->cur_ruids[j]);
@@ -377,7 +391,7 @@ static void ssd_init_fdp_ruhtbl(struct FemuCtrl *n, struct ssd *ssd)
 		rum_slc = &ssd->rums_slc[i]; 
 		rum_qlc = &ssd->rums_qlc[i]; 
 		for (int j = 0; j < MAX_RUHS; j++) {
-			if (j < MAX_RUHS / 2) {
+			if (get_ruh_mode(ssd, j) == 0) {
 				pi_gc_ruid = get_next_free_ruid(ssd, rum_slc, j);
 				ssd->ruhtbl[j].pi_gc_ruids[i] = pi_gc_ruid;
 				ssd->rus[pi_gc_ruid].rut = RU_TYPE_PI_GC;
@@ -487,12 +501,11 @@ static void ssd_advance_fdp_write_pointer(struct ssd *ssd, uint16_t rgid, int lp
 {
 	struct ssdparams *spp = &ssd->sp;
 	struct fdp_ru_mgmt *rum = NULL;
-	int mode = 0;
-	if (ruhid < MAX_RUHS / 2) {
+	int mode = get_ruh_mode(ssd, ruhid);
+	if (mode == 0) {
 		rum = &ssd->rums_slc[rgid];
 	} else {
 		rum = &ssd->rums_qlc[rgid];
-		mode = 1;
 	}
 
 	struct ruh *ruh = &ssd->ruhtbl[ruhid];
@@ -578,7 +591,7 @@ static struct ppa fdp_get_new_page(struct ssd *ssd, uint16_t rgid,
 		int lpn, uint16_t ruhid, bool for_gc)
 {
 	struct fdp_ru_mgmt *rum = NULL;
-	if (ruhid < MAX_RUHS / 2)
+	if (get_ruh_mode(ssd, ruhid) == 0)
 		rum = &ssd->rums_slc[rgid];
 	else
 		rum = &ssd->rums_qlc[rgid];
@@ -1169,11 +1182,7 @@ static uint64_t fdp_gc_write_page(struct ssd *ssd, struct ppa *old_ppa, uint16_t
 
 	new_ppa = fdp_get_new_page(ssd, rgid, lpn, ruhid, true);
 
-	int mode;
-	if (ruhid < MAX_RUHS / 2)
-		mode = 0;
-	else
-		mode = 1;
+	int mode = get_ruh_mode(ssd, ruhid);
 
     /* update maptbl */
 
@@ -1742,7 +1751,7 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         }
 
         /* new write */
-		int mode = 0;
+		int mode = get_ruh_mode(ssd, ruhid);
 		ppa = (fdp_enabled ? fdp_get_new_page(ssd, rgid, 0, ruhid, false) : get_new_page(ssd));
 
 #ifdef FDP_DEBUG

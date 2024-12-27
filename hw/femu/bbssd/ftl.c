@@ -770,15 +770,22 @@ static void ssd_init_nand_blk(struct nand_block *blk, struct ssdparams *spp)
     blk->wp = 0;
 }
 
+// 增加blk rber的随机生成
 static void ssd_init_nand_plane(struct nand_plane *pl, struct ssdparams *spp)
 {
     pl->nblks = spp->blks_per_pl;
     pl->blk = g_malloc0(sizeof(struct nand_block) * pl->nblks);
+
+	double min = 0.2;
+	double max = 1.0;
+	srand(time(NULL));
     for (int i = 0; i < pl->nblks; i++) {
 		if (get_blk_mode(spp, i) == 0)
 			pl->blk[i].mode = 0;
 		else
 			pl->blk[i].mode = 1;
+		pl->blk[i].rand_rate = min + (double) rand() / (double)RAND_MAX * (max - min);
+		//ftl_log("blk %d rand_rate %lf\n", i, pl->blk[i].rand_rate);
         ssd_init_nand_blk(&pl->blk[i], spp);
     }
 }
@@ -856,7 +863,7 @@ void ssd_init(FemuCtrl *n)
 
 	ssd_init_fdp_ru_mgmts(ssd); 						
 
-	ssd_init_fdp_ruhtbl(n, ssd);						
+	ssd_init_fdp_ruhtbl(n, ssd);				
 
     qemu_thread_create(&ssd->ftl_thread, "FEMU-FTL-Thread", ftl_thread, n,
                        QEMU_THREAD_JOINABLE);
@@ -976,8 +983,21 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
 		// 算读重试次数
         nand_stime = (lun->next_lun_avail_time < cmd_stime) ? cmd_stime : \
                      lun->next_lun_avail_time;
+		
+		// 磨损次数乘以随机值，显示不同闪存块的随机耐磨特性
+        double ec = (double)blk->erase_cnt * blk->rand_rate;
+		
+		// 分别计算不同类型页的磨损程度 qlc根据页类型，slc要乘以磨损比例
+		if (c == NAND_SLC_READ) {
+			ec = ec / spp->endurance_slc * spp->endurance_qlc;
+		} else if (c == NAND_QLC_READ_CL) {
+			ec = ec * 2;
+		} else if (c == NAND_QLC_READ_CU) {
+			ec = ec * 6;
+		} else if (c == NAND_QLC_READ_U) {
+			ec = ec * 6;
+		}
 
-        double ec = (double)blk->erase_cnt;
 		double rber = spp->epsilon + spp->alpha*pow(ec,spp->k);
 		rber = rber > 1.0 ? 1.0 : rber;
 		int bits_count = spp->secs_per_pg * spp->secsz * 8;
@@ -987,7 +1007,6 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
 			rber /= 2.0;
 			read_retry += 1;
 		}
-		//ftl_log("rr:%d\n", read_retry);
 		spp->read_retry += read_retry;
         lun->next_lun_avail_time = nand_stime + operation_lat * (1 + read_retry);
         lat = lun->next_lun_avail_time - cmd_stime;	
@@ -1684,6 +1703,7 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     return maxlat; 
 }
 
+// 优化读热数据放置
 static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 {
 	uint64_t lba = req->slba;
@@ -1713,7 +1733,7 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
 	if (dtype != NVME_DIRECTIVE_DATA_PLACEMENT) {
 		ph = 0;
-		rgid = 0; // TODO: consider striping later
+		rgid = 0;
 	}
 	ruhid = ns->fdp.phs[ph];
 	//ftl_log("%d\n", ruhid);

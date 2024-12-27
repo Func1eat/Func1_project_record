@@ -25,14 +25,14 @@ enum {
     NAND_SLC_READ_LAT = 30000,
     NAND_SLC_PROG_LAT = 160000,
     NAND_SLC_ERASE_LAT = 3000000,
-    NAND_QLC_READ_L_LAT = 48000,
-    NAND_QLC_READ_CL_LAT = 64000,
-    NAND_QLC_READ_CU_LAT = 80000,
-    NAND_QLC_READ_U_LAT = 96000,
-    NAND_QLC_PROG_L_LAT = 850000,
-    NAND_QLC_PROG_CL_LAT = 2300000,
-    NAND_QLC_PROG_CU_LAT = 3750000,
-    NAND_QLC_PROG_U_LAT = 5200000,
+    NAND_QLC_READ_L_LAT = 85000,
+    NAND_QLC_READ_CL_LAT = 170000,
+    NAND_QLC_READ_CU_LAT = 510000,
+    NAND_QLC_READ_U_LAT = 510000,
+    NAND_QLC_PROG_L_LAT = 510000,
+    NAND_QLC_PROG_CL_LAT = 510000,
+    NAND_QLC_PROG_CU_LAT = 510000,
+    NAND_QLC_PROG_U_LAT = 510000,
 	NAND_QLC_PROG_TOTAL_LAT = 1000000,
     NAND_QLC_ERASE_LAT = 3500000,
 };
@@ -110,6 +110,7 @@ struct nand_block {
     int erase_cnt;
     int wp; /* current write pointer */
 	int mode; // slc = 0  qlc = 1
+	double rand_rate; // 一个随机系数，用来生成原始误码率
 };
 
 struct nand_plane {

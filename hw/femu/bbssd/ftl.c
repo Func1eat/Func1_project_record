@@ -270,66 +270,66 @@ static int get_next_free_ruid(struct ssd *ssd, struct fdp_ru_mgmt *rum, int ruhi
 	int hottest = retru->erase_cnt;
 	
 	//热读
-	if (ruhid == 0) {
-		if (ssd->cv_moderate == 1) {
-			for (int i = 1; i < rum->free_ru_cnt; i++) {
-				retru = QTAILQ_NEXT(retru, entry);
-				if (retru->erase_cnt > hottest) {
-					hottest = retru->erase_cnt;
-					ru_tmp = retru;
-				} else if (retru->erase_cnt == hottest && retru->id < ru_tmp->id) {
-					ru_tmp = retru;
-				}
-			}
-		} // youngest block first
-		else {
-			for (int i = 1; i < rum->free_ru_cnt; i++) {
-				retru = QTAILQ_NEXT(retru, entry);
-				if (retru->erase_cnt < hottest) {
-					hottest = retru->erase_cnt;
-					ru_tmp = retru;
-				}
-			}
-		}
-	} else if (ruhid == 1) {
-		if (ssd->cv_moderate == 0) {
-			for (int i = 1; i < rum->free_ru_cnt; i++) {
-				retru = QTAILQ_NEXT(retru, entry);
-				if (retru->erase_cnt > hottest) {
-					hottest = retru->erase_cnt;
-					ru_tmp = retru;
-				} else if (retru->erase_cnt == hottest && retru->id < ru_tmp->id) {
-					ru_tmp = retru;
-				}
-			}
-		} // youngest block first
-		else {
-			for (int i = 1; i < rum->free_ru_cnt; i++) {
-				retru = QTAILQ_NEXT(retru, entry);
-				if (retru->erase_cnt < hottest) {
-					hottest = retru->erase_cnt;
-					ru_tmp = retru;
-				}
-			}
-		}
-	} else {
-		for (int i = 1; i < rum->free_ru_cnt; i++) {
-			retru = QTAILQ_NEXT(retru, entry);
-			if (retru->erase_cnt < hottest) {
-				hottest = retru->erase_cnt;
-				ru_tmp = retru;
-			}
-		}
-	}
-
-	// 动态磨损均衡，优先选择最年轻的RU进行写入
-  	// for (int i = 1; i < rum->free_ru_cnt; i++) {
-	// 	retru = QTAILQ_NEXT(retru, entry);
-	// 	if (retru->erase_cnt < hottest) {
-	// 		hottest = retru->erase_cnt;
-	// 		ru_tmp = retru;
+	// if (ruhid == 0) {
+	// 	if (ssd->cv_moderate == 1) {
+	// 		for (int i = 1; i < rum->free_ru_cnt; i++) {
+	// 			retru = QTAILQ_NEXT(retru, entry);
+	// 			if (retru->erase_cnt > hottest) {
+	// 				hottest = retru->erase_cnt;
+	// 				ru_tmp = retru;
+	// 			} else if (retru->erase_cnt == hottest && retru->id < ru_tmp->id) {
+	// 				ru_tmp = retru;
+	// 			}
+	// 		}
+	// 	} // youngest block first
+	// 	else {
+	// 		for (int i = 1; i < rum->free_ru_cnt; i++) {
+	// 			retru = QTAILQ_NEXT(retru, entry);
+	// 			if (retru->erase_cnt < hottest) {
+	// 				hottest = retru->erase_cnt;
+	// 				ru_tmp = retru;
+	// 			}
+	// 		}
+	// 	}
+	// } else if (ruhid == 1) {
+	// 	if (ssd->cv_moderate == 0) {
+	// 		for (int i = 1; i < rum->free_ru_cnt; i++) {
+	// 			retru = QTAILQ_NEXT(retru, entry);
+	// 			if (retru->erase_cnt > hottest) {
+	// 				hottest = retru->erase_cnt;
+	// 				ru_tmp = retru;
+	// 			} else if (retru->erase_cnt == hottest && retru->id < ru_tmp->id) {
+	// 				ru_tmp = retru;
+	// 			}
+	// 		}
+	// 	} // youngest block first
+	// 	else {
+	// 		for (int i = 1; i < rum->free_ru_cnt; i++) {
+	// 			retru = QTAILQ_NEXT(retru, entry);
+	// 			if (retru->erase_cnt < hottest) {
+	// 				hottest = retru->erase_cnt;
+	// 				ru_tmp = retru;
+	// 			}
+	// 		}
+	// 	}
+	// } else {
+	// 	for (int i = 1; i < rum->free_ru_cnt; i++) {
+	// 		retru = QTAILQ_NEXT(retru, entry);
+	// 		if (retru->erase_cnt < hottest) {
+	// 			hottest = retru->erase_cnt;
+	// 			ru_tmp = retru;
+	// 		}
 	// 	}
 	// }
+
+	// 动态磨损均衡，优先选择最年轻的RU进行写入
+  	for (int i = 1; i < rum->free_ru_cnt; i++) {
+		retru = QTAILQ_NEXT(retru, entry);
+		if (retru->erase_cnt < hottest) {
+			hottest = retru->erase_cnt;
+			ru_tmp = retru;
+		}
+	}
 
 	QTAILQ_REMOVE(&rum->free_ru_list, ru_tmp, entry);
 	rum->free_ru_cnt--;
@@ -497,11 +497,10 @@ static void ssd_advance_write_pointer(struct ssd *ssd)
         }
     }
 }
-static void ssd_advance_fdp_write_pointer(struct ssd *ssd, uint16_t rgid, int lpn, uint16_t ruhid, bool for_gc)
+static void ssd_advance_fdp_write_pointer(struct ssd *ssd, uint16_t rgid, int lpn, uint16_t ruhid, bool for_gc, int mode)
 {
 	struct ssdparams *spp = &ssd->sp;
 	struct fdp_ru_mgmt *rum = NULL;
-	int mode = get_ruh_mode(ssd, ruhid);
 	if (mode == 0) {
 		rum = &ssd->rums_slc[rgid];
 	} else {
@@ -588,10 +587,10 @@ static void ssd_advance_fdp_write_pointer(struct ssd *ssd, uint16_t rgid, int lp
 	} 
 }
 static struct ppa fdp_get_new_page(struct ssd *ssd, uint16_t rgid, 
-		int lpn, uint16_t ruhid, bool for_gc)
+		int lpn, uint16_t ruhid, bool for_gc, int mode)
 {
 	struct fdp_ru_mgmt *rum = NULL;
-	if (get_ruh_mode(ssd, ruhid) == 0)
+	if (mode == 0)
 		rum = &ssd->rums_slc[rgid];
 	else
 		rum = &ssd->rums_qlc[rgid];
@@ -604,7 +603,7 @@ static struct ppa fdp_get_new_page(struct ssd *ssd, uint16_t rgid,
 			ruid = rum->ii_gc_ruid;
 		else if (ruh->ruht == NVME_RUHT_PERSISTENTLY_ISOLATED)
 			ruid = ruh->pi_gc_ruids[rgid];
-		else { 
+		else {
 			if (ssd->gc_cnt[lpn] == 0)
 				ruid = ruh->pi_gc_ruids[rgid];
 			else 
@@ -735,6 +734,8 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
 	spp->pages_from_host = 0;
     spp->pages_from_gc = 0;
     spp->pages_from_wl = 0;
+
+	spp->gc_slc_to_qlc_threshold = 0.2;
 
     check_params(spp);
 }
@@ -1191,7 +1192,7 @@ static void gc_read_page(struct ssd *ssd, struct ppa *ppa)
 }
 
 /* move valid page data (already in DRAM) from victim line to a new page */
-static uint64_t fdp_gc_write_page(struct ssd *ssd, struct ppa *old_ppa, uint16_t rgid, uint16_t ruhid)
+static uint64_t fdp_gc_write_page(struct ssd *ssd, struct ppa *old_ppa, uint16_t rgid, uint16_t ruhid, int gc_flag)
 {
     struct ppa new_ppa;
     struct nand_lun *new_lun;
@@ -1199,9 +1200,13 @@ static uint64_t fdp_gc_write_page(struct ssd *ssd, struct ppa *old_ppa, uint16_t
 
     ftl_assert(valid_lpn(ssd, lpn));
 
-	new_ppa = fdp_get_new_page(ssd, rgid, lpn, ruhid, true);
-
 	int mode = get_ruh_mode(ssd, ruhid);
+
+	// 当gc效率低于阈值时将数据迁往qlc
+	if (mode == 0 && gc_flag == 1)
+		mode = 1;
+
+	new_ppa = fdp_get_new_page(ssd, rgid, lpn, ruhid, true, mode);
 
     /* update maptbl */
 
@@ -1212,7 +1217,7 @@ static uint64_t fdp_gc_write_page(struct ssd *ssd, struct ppa *old_ppa, uint16_t
 	mark_page_valid(ssd, &new_ppa);
 
     /* need to advance the write pointer here */
-	ssd_advance_fdp_write_pointer(ssd, rgid, lpn, ruhid, true);
+	ssd_advance_fdp_write_pointer(ssd, rgid, lpn, ruhid, true, mode);
 
 	ssd->gc_cnt[lpn]++;
 	
@@ -1367,6 +1372,14 @@ static int fdp_clean_one_block(struct ssd *ssd, struct ppa *ppa, uint16_t rgid, 
     struct nand_page *pg_iter = NULL;
     int cnt = 0;
 	
+	struct ru *victim_ru = get_ru(ssd, &ppa);
+
+	int gc_flag = 0; // flag=0表示迁移数据仍放置在slc，否则表示迁移数据放置在qlc
+	double gc_ratio = victim_ru->ipc / (double)spp->pgs_per_ru; // ipc小于阈值说明当前存在大部分数据要做迁移
+	if (gc_ratio < spp->gc_slc_to_qlc_threshold) {
+		gc_flag = 1;
+	}
+
     for (int pg = 0; pg < spp->pgs_per_blk; pg++) {
         ppa->g.pg = pg;
 #ifdef FDP_DEBUG
@@ -1379,7 +1392,8 @@ static int fdp_clean_one_block(struct ssd *ssd, struct ppa *ppa, uint16_t rgid, 
         if (pg_iter->status == PG_VALID) {
             gc_read_page(ssd, ppa);
             /* delay the maptbl update until "write" happens */
-            fdp_gc_write_page(ssd, ppa, rgid, ruhid);
+			// 当gc效率较低时，将gc需要迁移的数据放置在qlc中
+            fdp_gc_write_page(ssd, ppa, rgid, ruhid, gc_flag);
             cnt++;
         }
     }
@@ -1703,7 +1717,7 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     return maxlat; 
 }
 
-// 优化读热数据放置
+// 当ruhid为0或者1时，写入被定向到SLC
 static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 {
 	uint64_t lba = req->slba;
@@ -1772,7 +1786,7 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
         /* new write */
 		int mode = get_ruh_mode(ssd, ruhid);
-		ppa = (fdp_enabled ? fdp_get_new_page(ssd, rgid, 0, ruhid, false) : get_new_page(ssd));
+		ppa = (fdp_enabled ? fdp_get_new_page(ssd, rgid, 0, ruhid, false, mode) : get_new_page(ssd));
 
 #ifdef FDP_DEBUG
 		printf("pid: %10d lpn: %10ld rgid: %5d ruhid: %5d ch: %5d, lun: %5d, blk: %5d, pg: %5d\n", 
@@ -1788,7 +1802,7 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
         /* need to advance the write pointer here */
 		if (fdp_enabled)  {
-			ssd_advance_fdp_write_pointer(ssd, rgid, 0, ruhid, false);
+			ssd_advance_fdp_write_pointer(ssd, rgid, 0, ruhid, false, mode);
 		}
 		else
 			ssd_advance_write_pointer(ssd);

@@ -228,6 +228,9 @@ struct ssdparams {
     
     uint64_t host_read_block;
     uint64_t host_write_block;
+
+    // gc效率阈值，低于该阈值表示当前需要将数据驱逐到qlc
+    double gc_slc_to_qlc_threshold;
 };
 
 typedef struct line {

@@ -111,7 +111,6 @@ struct nand_block {
     int erase_cnt;
     int wp; /* current write pointer */
 	int mode; // slc = 0  qlc = 1
-	double rand_rate; // 一个随机系数，用来生成原始误码率
 };
 
 struct nand_plane {
@@ -292,6 +291,8 @@ typedef struct ru {
 
 	int erase_cnt;
 	int mode;
+
+	double rand_rate; // rand_rate表示该ru中每个块的擦写次数上限等于标准的endurance * rand_rate
 } ru; 					
 
 struct ruh {				

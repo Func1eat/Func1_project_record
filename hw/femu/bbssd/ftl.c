@@ -163,6 +163,7 @@ static inline void victim_ru_set_pos(void *a, size_t pos)
 }																	
 
 // 每个rg一个rum来管理free、victim ru list等
+// 增加每个ru中rand_rate的初始化
 static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 {
 	struct ssdparams *spp = &ssd->sp;
@@ -173,6 +174,11 @@ static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 	ssd->rus =  g_malloc0(sizeof(struct ru) * spp->tt_rus);
 	ssd->rums_slc = g_malloc(sizeof(struct fdp_ru_mgmt) * nrg);
 	ssd->rums_qlc = g_malloc(sizeof(struct fdp_ru_mgmt) * nrg);
+
+	// rand_rate取值范围
+	double min = 0.5;
+	double max = 1.5;
+	srand(time(NULL));
 
 	for (int i = 0; i < nrg; i++) {
 		rum_slc = &ssd->rums_slc[i];
@@ -202,6 +208,7 @@ static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 
 		rum_slc->free_ru_cnt = 0;
 		rum_qlc->free_ru_cnt = 0;
+		
 		for (int j = 0; j < rum_slc->tt_rus; j++) {
 			ru = &ssd->rus[j];
 			ru->id = j;
@@ -216,7 +223,7 @@ static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 			ru->erase_cnt = 0;
 			ru->mode = 0;
 			ru->rut = RU_TYPE_NORMAL;
-
+			ru->rand_rate = min + (double) rand() / (double)RAND_MAX * (max - min);
 			QTAILQ_INSERT_TAIL(&rum_slc->free_ru_list, ru, entry);
 			rum_slc->free_ru_cnt++;
 		}
@@ -235,7 +242,7 @@ static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 			ru->erase_cnt = 0;
 			ru->mode = 1;
 			ru->rut = RU_TYPE_NORMAL;
-
+			ru->rand_rate = min + (double) rand() / (double)RAND_MAX * (max - min);
 			QTAILQ_INSERT_TAIL(&rum_qlc->free_ru_list, ru, entry);
 			rum_qlc->free_ru_cnt++;
 		}
@@ -774,22 +781,15 @@ static void ssd_init_nand_blk(struct nand_block *blk, struct ssdparams *spp)
     blk->wp = 0;
 }
 
-// 增加blk rber的随机生成
 static void ssd_init_nand_plane(struct nand_plane *pl, struct ssdparams *spp)
 {
     pl->nblks = spp->blks_per_pl;
     pl->blk = g_malloc0(sizeof(struct nand_block) * pl->nblks);
-
-	double min = 0.2;
-	double max = 1.0;
-	srand(time(NULL));
     for (int i = 0; i < pl->nblks; i++) {
 		if (get_blk_mode(spp, i) == 0)
 			pl->blk[i].mode = 0;
 		else
 			pl->blk[i].mode = 1;
-		pl->blk[i].rand_rate = min + (double) rand() / (double)RAND_MAX * (max - min);
-		//ftl_log("blk %d rand_rate %lf\n", i, pl->blk[i].rand_rate);
         ssd_init_nand_blk(&pl->blk[i], spp);
     }
 }
@@ -953,7 +953,7 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
     uint64_t nand_stime;
     struct ssdparams *spp = &ssd->sp;
     struct nand_lun *lun = get_lun(ssd, ppa);
-	struct nand_block *blk = get_blk(ssd, ppa);
+	struct ru *cur_ru = get_ru(ssd, ppa);
     uint64_t lat = 0, operation_lat = 0;
 
 	if (c == NAND_SLC_READ)
@@ -988,8 +988,8 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
         nand_stime = (lun->next_lun_avail_time < cmd_stime) ? cmd_stime : \
                      lun->next_lun_avail_time;
 		
-		// 磨损次数乘以随机值，显示不同闪存块的随机耐磨特性
-        double ec = (double)blk->erase_cnt * blk->rand_rate;
+		// ec表示耐磨度，等于当前擦除次数除以rand_rate
+        double ec = (double)cur_ru->erase_cnt / cur_ru->rand_rate;
 		
 		// 分别计算不同类型页的磨损程度 qlc根据页类型，slc要乘以磨损比例
 		if (c == NAND_SLC_READ) {
@@ -1621,7 +1621,8 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 	victim_ru->vpc = 0;
 	
     // 块到达磨损上限，弃用整个超级块
-    if ((mode == 0 && victim_ru->erase_cnt >= spp->endurance_slc) || (mode == 1 && victim_ru->erase_cnt >= spp->endurance_qlc)) {
+	double cur_endurance = mode == 0? victim_ru->rand_rate * (double) spp->endurance_slc : victim_ru->rand_rate * (double) spp->endurance_qlc;
+    if (victim_ru->erase_cnt >= cur_endurance) {
 		QTAILQ_INSERT_TAIL(&rum->bad_ru_list, victim_ru, entry);
 		rum->bad_ru_cnt++;
 		ftl_log("Ru %d becomes bad!\n", victim_ru->id);
@@ -1653,7 +1654,7 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 				else
 					cur_ru = &ssd->rus[ssd->rums_slc[rgid].tt_rus + i];
 				// 统计没有坏的ru的总磨损次数
-				if ((cur_ru->erase_cnt < endurance)) {
+				if ((cur_ru->erase_cnt < cur_ru->rand_rate * (double)endurance)) {
 					wl_rus++;
 					erase_sum += cur_ru->erase_cnt;
 				}

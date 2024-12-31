@@ -1192,7 +1192,7 @@ static void gc_read_page(struct ssd *ssd, struct ppa *ppa)
 }
 
 /* move valid page data (already in DRAM) from victim line to a new page */
-static uint64_t fdp_gc_write_page(struct ssd *ssd, struct ppa *old_ppa, uint16_t rgid, uint16_t ruhid, int gc_flag)
+static uint64_t fdp_gc_write_page(struct ssd *ssd, struct ppa *old_ppa, uint16_t rgid, uint16_t ruhid)
 {
     struct ppa new_ppa;
     struct nand_lun *new_lun;
@@ -1201,10 +1201,6 @@ static uint64_t fdp_gc_write_page(struct ssd *ssd, struct ppa *old_ppa, uint16_t
     ftl_assert(valid_lpn(ssd, lpn));
 
 	int mode = get_ruh_mode(ssd, ruhid);
-
-	// 当gc效率低于阈值时将数据迁往qlc
-	if (mode == 0 && gc_flag == 1)
-		mode = 1;
 
 	new_ppa = fdp_get_new_page(ssd, rgid, lpn, ruhid, true, mode);
 
@@ -1372,14 +1368,6 @@ static int fdp_clean_one_block(struct ssd *ssd, struct ppa *ppa, uint16_t rgid, 
     struct nand_page *pg_iter = NULL;
     int cnt = 0;
 	
-	struct ru *victim_ru = get_ru(ssd, &ppa);
-
-	int gc_flag = 0; // flag=0表示迁移数据仍放置在slc，否则表示迁移数据放置在qlc
-	double gc_ratio = victim_ru->ipc / (double)spp->pgs_per_ru; // ipc小于阈值说明当前存在大部分数据要做迁移
-	if (gc_ratio < spp->gc_slc_to_qlc_threshold) {
-		gc_flag = 1;
-	}
-
     for (int pg = 0; pg < spp->pgs_per_blk; pg++) {
         ppa->g.pg = pg;
 #ifdef FDP_DEBUG
@@ -1393,7 +1381,7 @@ static int fdp_clean_one_block(struct ssd *ssd, struct ppa *ppa, uint16_t rgid, 
             gc_read_page(ssd, ppa);
             /* delay the maptbl update until "write" happens */
 			// 当gc效率较低时，将gc需要迁移的数据放置在qlc中
-            fdp_gc_write_page(ssd, ppa, rgid, ruhid, gc_flag);
+            fdp_gc_write_page(ssd, ppa, rgid, ruhid);
             cnt++;
         }
     }
@@ -1560,6 +1548,14 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
     ftl_log("GC-ing ru:%d,ipc=%d,vpc=%d,victim=%d,full=%d,free=%d,bad=%d,ruhid=%d\n", victim_ru->id,
               victim_ru->ipc, victim_ru->vpc, rum->victim_ru_cnt, rum->full_ru_cnt, rum->free_ru_cnt, rum->bad_ru_cnt, ruhid); 
 
+
+	double gc_ratio = victim_ru->ipc / (double)spp->pgs_per_ru; // ipc小于阈值说明当前存在大部分有效数据，需要要做迁移
+	if (gc_ratio < spp->gc_slc_to_qlc_threshold && get_ruh_mode(ssd, ruhid) == 0) {
+		// to do ruhid的修改
+		ftl_log("gc_ratio: %lf begin migrate!\n", gc_ratio);
+		ruhid = 3;
+	}
+
 	for (int lunidx = start_lunidx; lunidx < start_lunidx + RG_DEGREE; lunidx++) {
 		ppa.g.ch = lunidx / spp->luns_per_ch;
 		ppa.g.lun = lunidx % spp->luns_per_ch;
@@ -1644,6 +1640,21 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 
 	return;
 }
+
+static struct ru* select_victim_ru_slc_full(struct ssd *ssd, uint16_t rgid){
+	struct fdp_ru_mgmt *rum = &ssd->rums_slc[rgid];
+    struct ru *victim_ru = QTAILQ_FIRST(&rum->full_ru_list);
+    if (!victim_ru) {
+        return NULL;
+    } 
+
+	QTAILQ_REMOVE(&rum->full_ru_list, victim_ru, entry);
+    rum->full_ru_cnt--;
+
+    /* victim_ru is a danggling node now */
+	ftl_log("slc full_ru: %d\n", victim_ru->id);
+    return victim_ru;
+}
 static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, NvmeRequest *req, int gc_flag)
 {
 	struct ru *victim_ru_slc, *victim_ru_qlc = NULL;
@@ -1654,7 +1665,13 @@ static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, NvmeRequest *re
 	}
 	if (gc_flag == 3 || gc_flag == 1) {
 		victim_ru_slc = select_victim_ru_slc(ssd, force, rgid);
-		if(victim_ru_slc)
+
+		// slc若是已满，选不到victim_ru_slc，则触发迁移操作
+		if(!victim_ru_slc) {
+			// 在full_list里面选迁移目标
+			victim_ru_slc = select_victim_ru_slc_full(ssd, rgid);
+		}
+		if (victim_ru_slc)
 			erase_victim_ru(ssd, victim_ru_slc->id, 0, rgid, req);
 	}
     if (!victim_ru_qlc && !victim_ru_slc) {

@@ -162,6 +162,32 @@ static inline void victim_ru_set_pos(void *a, size_t pos)
     ((struct ru *)a)->pos = pos;
 }																	
 
+// 获取slc区域中第i个ru的ru_id
+static inline int get_slc_ru_id(struct ssd *ssd, int i)
+{
+	int index = 0;
+	if (ssd->sp.ru_mode == 0) {
+		index = i;
+	} else if (ssd->sp.ru_mode == 1) {
+		index = ssd->indices[i + ssd->rums_qlc->tt_rus];
+	} else
+		index = ssd->indices[i];
+	return index;
+}
+
+// 获取qlc区域中第i个ru的ru_id
+static inline int get_qlc_ru_id(struct ssd *ssd, int i)
+{
+	int index = 0;
+	if (ssd->sp.ru_mode == 0) {
+		index = i + ssd->rums_slc->tt_rus;
+	} else if (ssd->sp.ru_mode == 1) {
+		index = ssd->indices[i];
+	} else
+		index = ssd->indices[i + ssd->rums_slc->tt_rus];
+	return index;
+}
+
 // 每个rg一个rum来管理free、victim ru list等
 // 增加每个ru中rand_rate的初始化
 static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
@@ -174,6 +200,7 @@ static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 	ssd->rus =  g_malloc0(sizeof(struct ru) * spp->tt_rus);
 	ssd->rums_slc = g_malloc(sizeof(struct fdp_ru_mgmt) * nrg);
 	ssd->rums_qlc = g_malloc(sizeof(struct fdp_ru_mgmt) * nrg);
+	ssd->rand_rate = g_malloc(sizeof(double) * spp->tt_rus);
 
 	// rand_rate取值范围
 	double min = 0.5;
@@ -209,7 +236,8 @@ static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 		rum_slc->free_ru_cnt = 0;
 		rum_qlc->free_ru_cnt = 0;
 		
-		for (int j = 0; j < rum_slc->tt_rus; j++) {
+		// 生成所有ru的信息
+		for (int j = 0; j < spp->tt_rus; j++) {
 			ru = &ssd->rus[j];
 			ru->id = j;
 			ru->wp.ch = i * RG_DEGREE / spp->luns_per_ch;
@@ -221,28 +249,43 @@ static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 			ru->vpc = 0;
 			ru->pos = 0;
 			ru->erase_cnt = 0;
-			ru->mode = 0;
 			ru->rut = RU_TYPE_NORMAL;
 			ru->rand_rate = min + (double) rand() / (double)RAND_MAX * (max - min);
+			ssd->rand_rate[j] = ru->rand_rate;
+		}
+
+		// 对rand_rate进行排序，记录索引
+		ssd->indices = g_malloc(sizeof(int) * spp->tt_rus);
+		double *tmp = g_malloc(sizeof(double) * spp->tt_rus);
+		for (int j = 0; j < spp->tt_rus; j ++) {
+			ssd->indices[j] = j;
+			tmp[j] = ssd->rand_rate[j];
+		}
+		// 从大到小排序
+		for (int j = 0; j < spp->tt_rus - 1; j++) {
+			for (int k = 0; k < spp->tt_rus - j - 1; k++) {
+				if (tmp[k] < tmp[k + 1]) {
+					int temp = ssd->indices[k];
+					ssd->indices[k] = ssd->indices[k + 1];
+					ssd->indices[k + 1] = temp;
+
+					double t = tmp[k];
+					tmp[k] = tmp[k + 1];
+					tmp[k + 1] = t;
+				}
+			}
+		}
+
+		// 将ru放置在不同区域
+		for (int j = 0; j < rum_slc->tt_rus; j ++) {
+			ru = &ssd->rus[get_slc_ru_id(ssd, j)];
+			ru->mode = 0;
 			QTAILQ_INSERT_TAIL(&rum_slc->free_ru_list, ru, entry);
 			rum_slc->free_ru_cnt++;
 		}
-
-		for (int j = 0; j < rum_qlc->tt_rus; j++) {
-			ru = &ssd->rus[j + rum_slc->tt_rus];
-			ru->id = j + rum_slc->tt_rus;
-			ru->wp.ch = i * RG_DEGREE / spp->luns_per_ch;
-			ru->wp.lun = i * RG_DEGREE % spp->luns_per_ch; 
-			ru->wp.pl = 0;
-			ru->wp.blk = j + rum_slc->tt_rus;
-			ru->wp.pg = 0;
-			ru->ipc = 0;
-			ru->vpc = 0;
-			ru->pos = 0;
-			ru->erase_cnt = 0;
+		for (int j = 0; j < rum_qlc->tt_rus; j ++) {
+			ru = &ssd->rus[get_qlc_ru_id(ssd, j)];
 			ru->mode = 1;
-			ru->rut = RU_TYPE_NORMAL;
-			ru->rand_rate = min + (double) rand() / (double)RAND_MAX * (max - min);
 			QTAILQ_INSERT_TAIL(&rum_qlc->free_ru_list, ru, entry);
 			rum_qlc->free_ru_cnt++;
 		}
@@ -746,6 +789,8 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
 	spp->gc_slc_to_qlc_threshold = 0.2;
 	spp->enable_dwl = 1;
 	spp->enable_swl = 1;
+
+	spp->ru_mode = 1;
 
     check_params(spp);
 }
@@ -1604,9 +1649,9 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 	double util = 0.0;
 	for (int i = 0; i < rum->tt_rus; i++) {
 		if (mode == 0)
-			tmp = &ssd->rus[i];
+			tmp = &ssd->rus[get_slc_ru_id(ssd, i)];
 		else
-			tmp = &ssd->rus[ssd->rums_slc[rgid].tt_rus + i];
+			tmp = &ssd->rus[get_qlc_ru_id(ssd, i)];
 		util += tmp->vpc;
 	}
 	ftl_log("valid page:%lf\n", util);
@@ -1650,9 +1695,9 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 			// 只在victim_ru所在的区域执行静态磨损均衡
 			for (int i = 0; i < rum->tt_rus; i++) {
 				if (mode == 0)
-					cur_ru = &ssd->rus[i];
+					cur_ru = &ssd->rus[get_slc_ru_id(ssd, i)];
 				else
-					cur_ru = &ssd->rus[ssd->rums_slc[rgid].tt_rus + i];
+					cur_ru = &ssd->rus[get_qlc_ru_id(ssd, i)];
 				// 统计没有坏的ru的总磨损次数
 				if ((cur_ru->erase_cnt < cur_ru->rand_rate * (double)endurance)) {
 					wl_rus++;

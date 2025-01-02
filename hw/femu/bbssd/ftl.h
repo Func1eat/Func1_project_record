@@ -233,6 +233,9 @@ struct ssdparams {
 
     // gc效率阈值，低于该阈值表示当前需要将数据驱逐到qlc
     double gc_slc_to_qlc_threshold;
+
+	// ru mode 0表示按照序号将ru分为slc qlc，1表示将耐磨度低的分为slc，2表示将耐磨度高的分为slc
+	int ru_mode;
 };
 
 typedef struct line {
@@ -332,6 +335,11 @@ struct ssd {
 	int fdp_enabled;
 
 	int cv_moderate;
+
+	// 存放所有ru的rand_rate,方便排序
+	double *rand_rate;
+	int *indices; // 记录从大到小rand_rate的ru的索引
+  
     /* lockless ring for communication with NVMe IO thread */
     struct rte_ring **to_ftl;
     struct rte_ring **to_poller;

@@ -178,7 +178,7 @@ static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 	// rand_rate取值范围
 	double min = 0.5;
 	double max = 1.5;
-	srand(time(NULL));
+	srand(0); // 可复现的随机序列
 
 	for (int i = 0; i < nrg; i++) {
 		rum_slc = &ssd->rums_slc[i];

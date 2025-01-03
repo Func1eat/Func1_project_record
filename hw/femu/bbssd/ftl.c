@@ -5,6 +5,8 @@
 
 static void *ftl_thread(void *arg);
 static void output_info_log(struct ssd *ssd);
+static void read_req_migrate(struct ssd *ssd, uint64_t lpn);
+static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, int gc_flag);
 
 // 获取ruh的模式为slc还是qlc
 static inline int get_ruh_mode(struct ssd *ssd, int ruhid) {
@@ -248,7 +250,7 @@ static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 			ru->ipc = 0;
 			ru->vpc = 0;
 			ru->pos = 0;
-			ru->erase_cnt = 0;
+			ru->erase_cnt = 50;
 			ru->rut = RU_TYPE_NORMAL;
 			ru->rand_rate = min + (double) rand() / (double)RAND_MAX * (max - min);
 			ssd->rand_rate[j] = ru->rand_rate;
@@ -790,8 +792,9 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
 	spp->enable_dwl = 1;
 	spp->enable_swl = 1;
 
-	spp->ru_mode = 1;
+	spp->ru_mode = n->bb_params.ru_mode;
 	spp->read_migration = n->bb_params.read_migration;
+	spp->read_latency_threshold = 2 * NAND_QLC_READ_CU_LAT;
     check_params(spp);
 }
 
@@ -901,6 +904,10 @@ void ssd_init(FemuCtrl *n)
 	ssd_init_fdp_ru_mgmts(ssd); 						
 
 	ssd_init_fdp_ruhtbl(n, ssd);				
+
+	// 初始化lpntbl
+	ssd->lpnrtbl = gmalloc_0(spp->tt_pgs * sizeof(int));
+	ssd->lpnwtbl = gmalloc_0(spp->tt_pgs * sizeof(int));
 
     qemu_thread_create(&ssd->ftl_thread, "FEMU-FTL-Thread", ftl_thread, n,
                        QEMU_THREAD_JOINABLE);
@@ -1045,7 +1052,16 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
 			read_retry += 1;
 		}
 		spp->read_retry += read_retry;
-        lun->next_lun_avail_time = nand_stime + operation_lat * (1 + read_retry);
+		uint64_t req_lat = operation_lat * (1 + read_retry);
+        lun->next_lun_avail_time = nand_stime + req_lat;
+
+		// 读时延超过阈值，进行数据迁移
+		if ((spp->read_migration == 1 && read_retry >= 2 && c != NAND_SLC_READ) || (spp->read_migration == 2 && req_lat >= spp->read_latency_threshold && c != NAND_SLC_READ)){
+			uint64_t lpn = get_rmap_ent(ssd, ppa);
+			//ftl_log("lpn: %"PRIu64" read latency:%"PRIu64"\n", lpn, req_lat);
+			//ftl_log("begin read migrate\n");
+			read_req_migrate(ssd, lpn);
+		}
         lat = lun->next_lun_avail_time - cmd_stime;	
 	} else {
 		nand_stime = (lun->next_lun_avail_time < cmd_stime) ? cmd_stime : \
@@ -1053,7 +1069,6 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
         lun->next_lun_avail_time = nand_stime + operation_lat;
         lat = lun->next_lun_avail_time - cmd_stime;
 	}
-
     return lat;
 }
 
@@ -1225,6 +1240,64 @@ static void gc_read_page(struct ssd *ssd, struct ppa *ppa)
 		gcr.stime = 0;
         ssd_advance_status(ssd, ppa, &gcr);
     }
+}
+// 将lpn对应的数据迁移到slc中
+static void read_req_migrate(struct ssd *ssd, uint64_t lpn) {
+	int gc_flag = 0;
+	int r;
+	/* perform GC here until !should_fdp_gc(ssd, rgid) */
+	while ((gc_flag = should_fdp_gc_high(ssd, 0))) {
+		r = do_fdp_gc(ssd, 0, true, gc_flag);
+		if (r == -1)
+			break;
+	}
+
+	// 因为是在读请求过程中触发的，所以避免了读操作，直接进行写操作迁移数据
+	struct ppa ppa;
+	ppa = get_maptbl_ent(ssd, lpn);
+	struct ssdparams *spp = &ssd->sp;
+
+	// 更新rmap
+	if (mapped_ppa(&ppa)) {
+		uint16_t old_rgid = (ppa.g.ch * spp->luns_per_ch + ppa.g.lun) / RG_DEGREE;
+		mark_page_invalid(ssd, &ppa, old_rgid); 
+		set_rmap_ent(ssd, INVALID_LPN, &ppa);
+		ssd->gc_cnt[lpn] = 0;
+	}
+
+	/* new write */
+	int mode = 0;
+	// to do ruhid定为1，rg定为0
+	ppa = fdp_get_new_page(ssd, 0, 0, 1, false, mode);
+
+	/* update maptbl */
+	set_maptbl_ent(ssd, lpn, &ppa);
+	/* update rmap */
+	set_rmap_ent(ssd, lpn, &ppa);
+
+	mark_page_valid(ssd, &ppa);
+
+	ssd_advance_fdp_write_pointer(ssd, 0, 0, 1, false, mode);
+
+	struct nand_cmd swr;
+	swr.type = USER_IO;
+
+	if (mode == 0)
+		swr.cmd = NAND_SLC_PROG;
+	else {
+		int page_type = ppa.g.pg % 4;
+		if (page_type == 0)
+			swr.cmd = NAND_QLC_PROG_L;
+		else if (page_type == 1)
+			swr.cmd = NAND_QLC_PROG_CL;
+		else if (page_type == 2)
+			swr.cmd = NAND_QLC_PROG_CU;
+		else
+			swr.cmd = NAND_QLC_PROG_U;
+	}
+
+	swr.stime = 0;
+	ssd_advance_status(ssd, &ppa, &swr);
 }
 
 /* move valid page data (already in DRAM) from victim line to a new page */
@@ -1463,46 +1536,18 @@ static void mark_line_free(struct ssd *ssd, struct ppa *ppa)
 }
 
 static void output_info_log(struct ssd *ssd) {
-	// ftl_log("output the info log\n");
-  	// FILE *fp_wa = NULL;
-    // struct fdp_ru_mgmt *rum = ssd->rums;
-  
-    // double wa = ((ssd->sp).pages_from_wl + (ssd->sp).pages_from_gc + (ssd->sp).pages_from_host) * 1.0 / (ssd->sp).pages_from_host;
-    // struct ru *ru;
-    // unsigned long long util = 0;
-    // for (int i = 0; i < rum->tt_rus; i++) {
-    //     ru = &rum->rus[i];
-    //     util += ru->vpc;
-    // }
-
+	ftl_log("output the info log\n");
     // char path2wa[80] = "wa.log.";
     // char path2ec[80] = "ec.log.";
+	char path2rwtbl[80] = "rwtbl.log";
     // strcat(path2wa, ssd->ssdname);
     // strcat(path2ec, ssd->ssdname);
-    // fp_wa = fopen(path2wa, "a+");
-    // fprintf(fp_wa, "WA=%.3f, util: %.1f(GB), pages from Host: %"PRIu64", pages from GC: %"PRIu64", pages from WL: %"PRIu64", read retry: %"PRIu64", bad_ru_cnt = %d, pages_from_host_read=%"PRIu64", host_read_block=%"PRIu64", host_write_block=%"PRIu64"\n", wa, util*4.0/1024/1024, (ssd->sp).pages_from_host, (ssd->sp).pages_from_gc, (ssd->sp).pages_from_wl, (ssd->sp).read_retry, rum->bad_ru_cnt, (ssd->sp).pages_from_host_read, (ssd->sp).host_read_block, (ssd->sp).host_write_block);
-    // fclose(fp_wa);
-
-    // ftl_log("Free_ru_cnt = %d, util: %.1f(GB), full_ru_cnt = %d, victim_ru_cnt = %d, bad_ru_cnt = %d, read_retry_cnt=%"PRIu64", pages_from_host_read=%"PRIu64", host_read_block=%"PRIu64", host_write_block=%"PRIu64"\n",rum->free_ru_cnt, util*4.0/1024/1024, rum->full_ru_cnt, rum->victim_ru_cnt, rum->bad_ru_cnt, (ssd->sp).read_retry, (ssd->sp).pages_from_host_read, (ssd->sp).host_read_block, (ssd->sp).host_write_block);
-
-    // FILE *fp= fopen(path2ec, "a+");
-    // if (fp != NULL) {
-    //     int* records = g_malloc0(sizeof(int) * rum->tt_rus);
-	// 	for (int i = 0; i < rum->tt_rus; i ++) {
-	// 		ru = &rum->rus[i];
-	// 		records[i] = ru->erase_cnt;
-	// 	}
-    //     for (int i = 0; i < rum->tt_rus; i++) {
-    //         fprintf(fp, "%d ", records[i]);
-    //     }
-    //     fprintf(fp, "\n");
-    //     fclose(fp);
-    //     free(records);
-
-    // } else {
-    //     perror("Error");
-    //     printf("Endurance log file open error!\n");
-    // }
+	//strcat(path2rwtbl, ssd->ssdname);
+	FILE *fp_rwtbl = fopen(path2rwtbl, "w+");
+	for (int i = 0; i < ssd->sp.tt_pgs; i ++) {
+		fprintf(fp_rwtbl, "%"PRIu64" %"PRIu64"\n", ssd->lpnrtbl[i], ssd->lpnwtbl[i]);
+	}
+	fclose(fp_rwtbl);
 	return;
 }
 
@@ -1553,7 +1598,7 @@ static int do_gc(struct ssd *ssd, bool force)
     return 0;
 }
 
-static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16_t rgid, NvmeRequest *req) { 
+static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16_t rgid) { 
 	struct ru *victim_ru = NULL;
 	struct ssdparams *spp = &ssd->sp;
 	struct nand_lun *lunp; 
@@ -1565,8 +1610,8 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 	else
 		rum = &ssd->rums_qlc[rgid];
 
-	NvmeRuHandle *ruh;
-	NvmeFdpEvent *e = NULL;
+	// NvmeRuHandle *ruh;
+	// NvmeFdpEvent *e = NULL;
 	int start_lunidx = rgid * RG_DEGREE;
 	uint16_t ruhid;
 
@@ -1579,7 +1624,7 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 	victim_ru = get_ru(ssd, &ppa);
 
 	ruhid = victim_ru->ruhid; 
-	ruh = &req->ns->endgrp->fdp.ruhs[ruhid];	
+	//ruh = &req->ns->endgrp->fdp.ruhs[ruhid];	
 
     ftl_log("GC-ing ru:%d,ipc=%d,vpc=%d,victim=%d,full=%d,free=%d,bad=%d,ruhid=%d\n", victim_ru->id,
               victim_ru->ipc, victim_ru->vpc, rum->victim_ru_cnt, rum->full_ru_cnt, rum->free_ru_cnt, rum->bad_ru_cnt, ruhid); 
@@ -1616,20 +1661,20 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 	}
 	victim_ru->erase_cnt += spp->gap;
 
-	if (ruh->ruht == NVME_RUHT_INITIALLY_ISOLATED && log_event(ruh, FDP_EVT_MEDIA_REALLOC)) {
-		struct nvme_fdp_event_realloc mr;
-		e = nvme_fdp_alloc_event(req->ns->ctrl, &req->ns->endgrp->fdp.ctrl_events);
-		e->type = FDP_EVT_MEDIA_REALLOC;
-		e->flags = FDPEF_PIV | FDPEF_NSIDV | FDPEF_LV;
-		e->pid = cpu_to_le16(ruhid);
-		e->nsid = cpu_to_le32(req->ns->id);
-		mr.flags = 1 << 0; // LIV on
-		mr.nlbam = gc_pgs * 8;
-		mr.lba = 0;
-		memcpy(e->type_specific, &mr, sizeof(mr));
-		e->rgid = cpu_to_le16(rgid);
-		e->ruhid = cpu_to_le16(ruhid);
-	}
+	// if (ruh->ruht == NVME_RUHT_INITIALLY_ISOLATED && log_event(ruh, FDP_EVT_MEDIA_REALLOC)) {
+	// 	struct nvme_fdp_event_realloc mr;
+	// 	e = nvme_fdp_alloc_event(req->ns->ctrl, &req->ns->endgrp->fdp.ctrl_events);
+	// 	e->type = FDP_EVT_MEDIA_REALLOC;
+	// 	e->flags = FDPEF_PIV | FDPEF_NSIDV | FDPEF_LV;
+	// 	e->pid = cpu_to_le16(ruhid);
+	// 	e->nsid = cpu_to_le32(req->ns->id);
+	// 	mr.flags = 1 << 0; // LIV on
+	// 	mr.nlbam = gc_pgs * 8;
+	// 	mr.lba = 0;
+	// 	memcpy(e->type_specific, &mr, sizeof(mr));
+	// 	e->rgid = cpu_to_le16(rgid);
+	// 	e->ruhid = cpu_to_le16(ruhid);
+	// }
 	ftl_log("ru:%d erase_cnt:%d\n", victim_ru->id, victim_ru->erase_cnt);
 
 	// 统计当前有效页数
@@ -1778,7 +1823,7 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 								gce.stime = 0;
 								ssd_advance_status(ssd, &ppa, &gce);
 								lunp->gc_endtime = lunp->next_lun_avail_time;
-								block_cold->erase_cnt += spp->gap;
+								ssd->rus[youngest_ru_id].erase_cnt += spp->gap;
 							}
 						}
 					}
@@ -1812,13 +1857,13 @@ static struct ru* select_victim_ru_slc_full(struct ssd *ssd, uint16_t rgid){
     return victim_ru;
 }
 
-static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, NvmeRequest *req, int gc_flag)
+static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, int gc_flag)
 {
 	struct ru *victim_ru_slc, *victim_ru_qlc = NULL;
 	if (gc_flag >= 2) {
     	victim_ru_qlc = select_victim_ru_qlc(ssd, force, rgid);
 		if(victim_ru_qlc)
-			erase_victim_ru(ssd, victim_ru_qlc->id, 1, rgid, req);
+			erase_victim_ru(ssd, victim_ru_qlc->id, 1, rgid);
 	}
 	if (gc_flag == 3 || gc_flag == 1) {
 		victim_ru_slc = select_victim_ru_slc(ssd, force, rgid);
@@ -1829,7 +1874,7 @@ static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, NvmeRequest *re
 			victim_ru_slc = select_victim_ru_slc_full(ssd, rgid);
 		}
 		if (victim_ru_slc)
-			erase_victim_ru(ssd, victim_ru_slc->id, 0, rgid, req);
+			erase_victim_ru(ssd, victim_ru_slc->id, 0, rgid);
 	}
     if (!victim_ru_qlc && !victim_ru_slc) {
         return -1;
@@ -1837,7 +1882,7 @@ static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, NvmeRequest *re
 
     return 0;
 }
-	
+
 static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -1856,6 +1901,7 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 
     /* normal IO read path */
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+		ssd->lpnrtbl[lpn] ++;
         ppa = get_maptbl_ent(ssd, lpn);
         if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
             //printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
@@ -1934,7 +1980,7 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 		int gc_flag = 0;
 		/* perform GC here until !should_fdp_gc(ssd, rgid) */
 		while ((gc_flag = should_fdp_gc_high(ssd, rgid))) {
-			r = do_fdp_gc(ssd, rgid, true, req, gc_flag);
+			r = do_fdp_gc(ssd, rgid, true, gc_flag);
 			if (r == -1)
 				break;
 		}
@@ -1949,6 +1995,7 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 	}
 
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+		ssd->lpnwtbl[lpn]++;
         ppa = get_maptbl_ent(ssd, lpn);
         if (mapped_ppa(&ppa)) {
             /* update old page information first */

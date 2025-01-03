@@ -237,6 +237,9 @@ struct ssdparams {
 	int ru_mode;
 	//0表示不迁移，1表示根据读取次数做迁移，2表示根据页面类型和读取次数做迁移
 	int read_migration;
+
+	// 读延迟阈值，高于此阈值的数据会被迁移到slc
+	uint64_t read_latency_threshold;
 };
 
 typedef struct line {
@@ -346,6 +349,10 @@ struct ssd {
     struct rte_ring **to_poller;
     bool *dataplane_started_ptr;
     QemuThread ftl_thread;
+
+	// 统计每个lpn的读写次数
+	int *lpnrtbl;
+    int *lpnwtbl;
 };
 
 void ssd_init(FemuCtrl *n);

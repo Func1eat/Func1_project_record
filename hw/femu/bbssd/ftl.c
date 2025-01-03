@@ -795,14 +795,6 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     check_params(spp);
 }
 
-// 给blk分配mode
-static int get_blk_mode(struct ssdparams *spp, int blk_id) {
-	int offset = spp->slc_op * 1.0 / (spp->slc_op + spp->qlc_op) * spp->blks_per_pl;
-	if (blk_id < offset)
-		return 0;
-	return 1;
-}
-
 static void ssd_init_nand_page(struct nand_page *pg, struct ssdparams *spp)
 {
     pg->nsecs = spp->secs_per_pg;
@@ -831,10 +823,6 @@ static void ssd_init_nand_plane(struct nand_plane *pl, struct ssdparams *spp)
     pl->nblks = spp->blks_per_pl;
     pl->blk = g_malloc0(sizeof(struct nand_block) * pl->nblks);
     for (int i = 0; i < pl->nblks; i++) {
-		if (get_blk_mode(spp, i) == 0)
-			pl->blk[i].mode = 0;
-		else
-			pl->blk[i].mode = 1;
         ssd_init_nand_blk(&pl->blk[i], spp);
     }
 }
@@ -1079,7 +1067,7 @@ static void mark_page_invalid(struct ssd *ssd, struct ppa *ppa, uint16_t rgid)
     bool was_full_line = false;
     bool was_full_ru = false;	
     struct line *line;
-    struct ru *ru; 
+    struct ru *ru = get_ru(ssd, ppa); 
 
     /* update corresponding page status */
     pg = get_pg(ssd, ppa);
@@ -1090,7 +1078,7 @@ static void mark_page_invalid(struct ssd *ssd, struct ppa *ppa, uint16_t rgid)
     blk = get_blk(ssd, ppa);
 	struct fdp_ru_mgmt *rum;
 	int pages_per_wl = 1;
-	if (blk->mode == 0) {
+	if (ru->mode == 0) {
 		rum = &ssd->rums_slc[rgid];
 		pages_per_wl = 4;
 	} else {
@@ -1105,7 +1093,6 @@ static void mark_page_invalid(struct ssd *ssd, struct ppa *ppa, uint16_t rgid)
 	if (ssd->fdp_enabled)
 	{ 
 		/* update corresponding ru status */
-		ru = get_ru(ssd, ppa);
 		ftl_assert(ru->ipc >= 0 && ru->ipc < spp->pgs_per_ru);
 		if (ru->vpc == spp->pgs_per_ru) {
 			ftl_assert(ru->ipc == 0);
@@ -1172,8 +1159,9 @@ static void mark_page_valid(struct ssd *ssd, struct ppa *ppa)
  
     /* update corresponding block status */
     blk = get_blk(ssd, ppa);
+	struct ru *cur_ru = get_ru(ssd, ppa);
 	int page_per_wl = 1;
-	if (blk->mode == 0) 
+	if (cur_ru->mode == 0) 
 		page_per_wl = 4;
     ftl_assert(blk->vpc >= 0 && blk->vpc < ssd->sp.pgs_per_blk);
     blk->vpc+=page_per_wl;
@@ -1215,8 +1203,8 @@ static void mark_block_free(struct ssd *ssd, struct ppa *ppa)
 static void gc_read_page(struct ssd *ssd, struct ppa *ppa)
 {
     /* advance ssd status, we don't care about how long it takes */
-	struct nand_block *cur_blk = get_blk(ssd, ppa);
-	int mode = cur_blk->mode;
+	struct ru *cur_ru = get_ru(ssd, ppa);
+	int mode = cur_ru->mode;
 
     if (ssd->sp.enable_gc_delay) {
         struct nand_cmd gcr;
@@ -1823,6 +1811,7 @@ static struct ru* select_victim_ru_slc_full(struct ssd *ssd, uint16_t rgid){
 	ftl_log("slc full_ru: %d\n", victim_ru->id);
     return victim_ru;
 }
+
 static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, NvmeRequest *req, int gc_flag)
 {
 	struct ru *victim_ru_slc, *victim_ru_qlc = NULL;
@@ -1878,8 +1867,8 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         struct nand_cmd srd;
         srd.type = USER_IO;
 
-		struct nand_block *cur_blk = get_blk(ssd, &ppa);
-		int mode = cur_blk->mode;
+		struct ru *cur_ru = get_ru(ssd, &ppa);
+		int mode = cur_ru->mode;
 
 		if (mode == 0)
 			srd.cmd = NAND_SLC_READ;

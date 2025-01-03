@@ -110,7 +110,6 @@ struct nand_block {
     int vpc; /* valid page count */
     int erase_cnt;
     int wp; /* current write pointer */
-	int mode; // slc = 0  qlc = 1
 };
 
 struct nand_plane {

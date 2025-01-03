@@ -5,6 +5,7 @@
 
 static void *ftl_thread(void *arg);
 static void output_info_log(struct ssd *ssd);
+static void read_req_migrate(struct ssd *ssd, uint64_t lpn);
 
 // 获取ruh的模式为slc还是qlc
 static inline int get_ruh_mode(struct ssd *ssd, int ruhid) {
@@ -792,6 +793,7 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
 
 	spp->ru_mode = 1;
 
+	spp->read_latency_threshold = 2 * NAND_QLC_READ_CU_LAT;
     check_params(spp);
 }
 
@@ -1045,7 +1047,16 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
 			read_retry += 1;
 		}
 		spp->read_retry += read_retry;
-        lun->next_lun_avail_time = nand_stime + operation_lat * (1 + read_retry);
+		uint64_t req_lat = operation_lat * (1 + read_retry);
+        lun->next_lun_avail_time = nand_stime + req_lat;
+
+		// 读时延超过阈值，进行数据迁移
+		if (req_lat >= spp->read_latency_threshold && c != NAND_SLC_READ) {
+			uint64_t lpn = get_rmap_ent(ssd, ppa);
+			//ftl_log("lpn: %"PRIu64" read latency:%"PRIu64"\n", lpn, req_lat);
+			//ftl_log("begin read migrate\n");
+			read_req_migrate(ssd, lpn);
+		}
         lat = lun->next_lun_avail_time - cmd_stime;	
 	} else {
 		nand_stime = (lun->next_lun_avail_time < cmd_stime) ? cmd_stime : \
@@ -1053,7 +1064,6 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
         lun->next_lun_avail_time = nand_stime + operation_lat;
         lat = lun->next_lun_avail_time - cmd_stime;
 	}
-
     return lat;
 }
 
@@ -1225,6 +1235,55 @@ static void gc_read_page(struct ssd *ssd, struct ppa *ppa)
 		gcr.stime = 0;
         ssd_advance_status(ssd, ppa, &gcr);
     }
+}
+// 将lpn对应的数据迁移到slc中
+static void read_req_migrate(struct ssd *ssd, uint64_t lpn) {
+	// 因为是在读请求过程中触发的，所以避免了读操作，直接进行写操作迁移shuju
+	struct ppa ppa;
+	ppa = get_maptbl_ent(ssd, lpn);
+	struct ssdparams *spp = &ssd->sp;
+
+	// 更新rmap
+	if (mapped_ppa(&ppa)) {
+		uint16_t old_rgid = (ppa.g.ch * spp->luns_per_ch + ppa.g.lun) / RG_DEGREE;
+		mark_page_invalid(ssd, &ppa, old_rgid); 
+		set_rmap_ent(ssd, INVALID_LPN, &ppa);
+		ssd->gc_cnt[lpn] = 0;
+	}
+
+	/* new write */
+	int mode = 0;
+	// to do ruhid定为1，rg定为0
+	ppa = fdp_get_new_page(ssd, 0, 0, 1, false, mode);
+
+	/* update maptbl */
+	set_maptbl_ent(ssd, lpn, &ppa);
+	/* update rmap */
+	set_rmap_ent(ssd, lpn, &ppa);
+
+	mark_page_valid(ssd, &ppa);
+
+	ssd_advance_fdp_write_pointer(ssd, 0, 0, 1, false, mode);
+
+	struct nand_cmd swr;
+	swr.type = USER_IO;
+
+	if (mode == 0)
+		swr.cmd = NAND_SLC_PROG;
+	else {
+		int page_type = ppa.g.pg % 4;
+		if (page_type == 0)
+			swr.cmd = NAND_QLC_PROG_L;
+		else if (page_type == 1)
+			swr.cmd = NAND_QLC_PROG_CL;
+		else if (page_type == 2)
+			swr.cmd = NAND_QLC_PROG_CU;
+		else
+			swr.cmd = NAND_QLC_PROG_U;
+	}
+
+	swr.stime = 0;
+	ssd_advance_status(ssd, &ppa, &swr);
 }
 
 /* move valid page data (already in DRAM) from victim line to a new page */
@@ -1837,7 +1896,7 @@ static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, NvmeRequest *re
 
     return 0;
 }
-	
+
 static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 {
     struct ssdparams *spp = &ssd->sp;

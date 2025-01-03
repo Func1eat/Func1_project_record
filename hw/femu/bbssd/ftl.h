@@ -235,6 +235,9 @@ struct ssdparams {
 
 	// ru mode 0表示按照序号将ru分为slc qlc，1表示将耐磨度低的分为slc，2表示将耐磨度高的分为slc
 	int ru_mode;
+
+	// 读延迟阈值，高于此阈值的数据会被迁移到slc
+	uint64_t read_latency_threshold;
 };
 
 typedef struct line {

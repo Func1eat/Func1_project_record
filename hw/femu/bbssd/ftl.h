@@ -235,6 +235,8 @@ struct ssdparams {
 
 	// ru mode 0表示按照序号将ru分为slc qlc，1表示将耐磨度低的分为slc，2表示将耐磨度高的分为slc
 	int ru_mode;
+	//0表示不迁移，1表示根据读取次数做迁移，2表示根据页面类型和读取次数做迁移
+	int read_migration;
 };
 
 typedef struct line {

@@ -1311,7 +1311,7 @@ typedef struct BbCtrlParams {
 
     int fdp_enabled;
     int cv_enabled;
-
+    int read_migration;
     int slc_op;
     int qlc_op;
 } BbCtrlParams;

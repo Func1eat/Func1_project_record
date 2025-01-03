@@ -777,6 +777,7 @@ static Property femu_props[] = {
     DEFINE_PROP_INT32("gc_thres_pcent_high", FemuCtrl, bb_params.gc_thres_pcent_high, 95),
     DEFINE_PROP_INT32("fdp_enabled", FemuCtrl, bb_params.fdp_enabled, 1),
     DEFINE_PROP_INT32("cv_enabled", FemuCtrl, bb_params.cv_enabled, 1),
+    DEFINE_PROP_INT32("read_migration", FemuCtrl, bb_params.read_migration, 1),
     DEFINE_PROP_INT32("slc_op", FemuCtrl, bb_params.slc_op, 25),
     DEFINE_PROP_INT32("qlc_op", FemuCtrl, bb_params.qlc_op, 75),
     DEFINE_PROP_END_OF_LIST(),

@@ -791,7 +791,7 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
 	spp->enable_swl = 1;
 
 	spp->ru_mode = 1;
-
+	spp->read_migration = n->bb_params.read_migration;
     check_params(spp);
 }
 

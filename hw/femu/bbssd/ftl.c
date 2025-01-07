@@ -771,8 +771,8 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
 
     spp->enable_gc_delay = true; 
 
-    spp->endurance_slc = 10000;
-	spp->endurance_qlc = 300;
+    spp->endurance_slc = 80000;
+	spp->endurance_qlc = 1500;
 
     spp->op = 0.0625;
 	//ftl_log("%lf\n", spp->op * spp->tt_secs);
@@ -906,8 +906,8 @@ void ssd_init(FemuCtrl *n)
 	ssd_init_fdp_ruhtbl(n, ssd);				
 
 	// 初始化lpntbl
-	ssd->lpnrtbl = gmalloc_0(spp->tt_pgs * sizeof(int));
-	ssd->lpnwtbl = gmalloc_0(spp->tt_pgs * sizeof(int));
+	ssd->lpnrtbl = g_malloc0(spp->tt_pgs * sizeof(int));
+	ssd->lpnwtbl = g_malloc0(spp->tt_pgs * sizeof(int));
 
     qemu_thread_create(&ssd->ftl_thread, "FEMU-FTL-Thread", ftl_thread, n,
                        QEMU_THREAD_JOINABLE);
@@ -1055,7 +1055,8 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
 		uint64_t req_lat = operation_lat * (1 + read_retry);
         lun->next_lun_avail_time = nand_stime + req_lat;
 
-		// 读时延超过阈值，进行数据迁移
+		// 满足条件：1.读时延超过阈值 2. SLC有空闲空间，进行数据迁移
+		// 循环迁移的问题
 		if ((spp->read_migration == 1 && read_retry >= 2 && c != NAND_SLC_READ) || (spp->read_migration == 2 && req_lat >= spp->read_latency_threshold && c != NAND_SLC_READ)){
 			uint64_t lpn = get_rmap_ent(ssd, ppa);
 			//ftl_log("lpn: %"PRIu64" read latency:%"PRIu64"\n", lpn, req_lat);
@@ -1241,6 +1242,7 @@ static void gc_read_page(struct ssd *ssd, struct ppa *ppa)
         ssd_advance_status(ssd, ppa, &gcr);
     }
 }
+
 // 将lpn对应的数据迁移到slc中
 static void read_req_migrate(struct ssd *ssd, uint64_t lpn) {
 	int gc_flag = 0;
@@ -1476,8 +1478,8 @@ static int fdp_clean_one_block(struct ssd *ssd, struct ppa *ppa, uint16_t rgid, 
     struct ssdparams *spp = &ssd->sp;
     struct nand_page *pg_iter = NULL;
     int cnt = 0;
-	
-    for (int pg = 0; pg < spp->pgs_per_blk; pg++) {
+	int mode = get_ruh_mode(ssd, ruhid);
+    for (int pg = 0; pg < spp->pgs_per_blk; ) {
         ppa->g.pg = pg;
 #ifdef FDP_DEBUG
 	printf("old_ch: %d old_lun: %d old_pl: %d old_blk: %d old_pg: %d\n",
@@ -1493,6 +1495,12 @@ static int fdp_clean_one_block(struct ssd *ssd, struct ppa *ppa, uint16_t rgid, 
             fdp_gc_write_page(ssd, ppa, rgid, ruhid);
             cnt++;
         }
+
+		// SLC块只需要扫描四分之一的块
+		if (mode == 0)
+			pg += 4;
+		else
+			pg ++;
     }
 
 	(ssd->sp).pages_from_gc += cnt;
@@ -1545,12 +1553,11 @@ static void output_info_log(struct ssd *ssd) {
 	//strcat(path2rwtbl, ssd->ssdname);
 	FILE *fp_rwtbl = fopen(path2rwtbl, "w+");
 	for (int i = 0; i < ssd->sp.tt_pgs; i ++) {
-		fprintf(fp_rwtbl, "%"PRIu64" %"PRIu64"\n", ssd->lpnrtbl[i], ssd->lpnwtbl[i]);
+		fprintf(fp_rwtbl, "%d %d\n", ssd->lpnrtbl[i], ssd->lpnwtbl[i]);
 	}
 	fclose(fp_rwtbl);
 	return;
 }
-
 
 static int do_gc(struct ssd *ssd, bool force)
 {

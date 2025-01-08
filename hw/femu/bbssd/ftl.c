@@ -165,7 +165,7 @@ static inline void victim_ru_set_pos(void *a, size_t pos)
 }																	
 
 // 获取slc区域中第i个ru的ru_id
-static inline int get_slc_ru_id(struct ssd *ssd, int i)
+int get_slc_ru_id(struct ssd *ssd, int i)
 {
 	int index = 0;
 	if (ssd->sp.ru_mode == 0) {
@@ -178,7 +178,7 @@ static inline int get_slc_ru_id(struct ssd *ssd, int i)
 }
 
 // 获取qlc区域中第i个ru的ru_id
-static inline int get_qlc_ru_id(struct ssd *ssd, int i)
+int get_qlc_ru_id(struct ssd *ssd, int i)
 {
 	int index = 0;
 	if (ssd->sp.ru_mode == 0) {

@@ -817,26 +817,50 @@ static uint16_t nvme_error_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
 }
 
 /* for gc stat */
+// 加log
+// 两个区域的平均pe次数
+// 写放大、读重试次数
 static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
 {
-	// struct ssd* ssd = n->ssd;
-	// double wa_cur = 0, ra_cur = 0;
-	// if (((ssd->sp).pages_from_host - (ssd->sp).pages_from_host_pre) != 0) {
-	// 	wa_cur = ((ssd->sp).pages_from_wl + (ssd->sp).pages_from_gc + (ssd->sp).pages_from_host - (ssd->sp).pages_from_wl_pre - (ssd->sp).pages_from_gc_pre - (ssd->sp).pages_from_host_pre) * 1.0 / ((ssd->sp).pages_from_host - (ssd->sp).pages_from_host_pre);
-	// }
-	// if (((ssd->sp).pages_from_host_read - (ssd->sp).pages_from_host_read_pre) != 0) {
-	// 	ra_cur = ((ssd->sp).read_retry - (ssd->sp).read_retry_pre) * 1.0 / ((ssd->sp).pages_from_host_read - (ssd->sp).pages_from_host_read_pre);
-	// }
+	struct ssd* ssd = n->ssd;
+	ftl_log("output the info log\n");
+    // char path2wa[80] = "wa.log.";
+    char path2ec[80] = "ec.log";
+	char path2rwtbl[80] = "rwtbl.log";
+	char path2wara[80] = "wara.log";
 
-	// (ssd->sp).pages_from_gc_pre = (ssd->sp).pages_from_gc;
-	// (ssd->sp).pages_from_wl_pre = (ssd->sp).pages_from_wl;
-	// (ssd->sp).pages_from_host_pre = (ssd->sp).pages_from_host;
-	// (ssd->sp).pages_from_host_read_pre = (ssd->sp).pages_from_host_read;
-	// (ssd->sp).read_retry_pre = (ssd->sp).read_retry;
+	// 打印两个区域的平均pe次数
+	FILE *fp_ec = fopen(path2ec, "a+");
+	struct fdp_ru_mgmt *rum_slc = ssd->rums_slc, *rum_qlc = ssd->rums_qlc;
+	struct ru *ru;
+	double erase_slc_cnt = 0, erase_qlc_cnt = 0;
+	for (int j = 0; j < rum_slc->tt_rus; j ++) {
+		ru = &ssd->rus[get_slc_ru_id(ssd, j)];
+		erase_slc_cnt += ru->erase_cnt;
+	}
+	erase_slc_cnt /= rum_slc->tt_rus;
+	for (int j = 0; j < rum_qlc->tt_rus; j ++) {
+		ru = &ssd->rus[get_qlc_ru_id(ssd, j)];
+		erase_qlc_cnt += ru->erase_cnt;
+	}
+	erase_qlc_cnt /= rum_qlc->tt_rus;
+	fprintf(fp_ec, "%lf %lf\n", erase_slc_cnt, erase_qlc_cnt);
+	fclose(fp_ec);
 
-	// FILE *wa_and_ra = fopen("wa_and_ra.log", "a+");
-	// fprintf(wa_and_ra, "%lf %lf\n", wa_cur, ra_cur);
-	// fclose(wa_and_ra);
+	// 打印rwtbl
+	FILE *fp_rwtbl = fopen(path2rwtbl, "w+");
+	for (int i = 0; i < ssd->sp.tt_pgs; i ++) {
+		fprintf(fp_rwtbl, "%d %d %d\n", i, ssd->lpnrtbl[i], ssd->lpnwtbl[i]);
+	}
+	fclose(fp_rwtbl);
+
+	// 打印写放大
+	// double wa = ((ssd->sp).pages_from_wl + (ssd->sp).pages_from_gc + (ssd->sp).pages_from_host - (ssd->sp).pages_from_wl_pre - (ssd->sp).pages_from_gc_pre - (ssd->sp).pages_from_host_pre) * 1.0 / ((ssd->sp).pages_from_host - (ssd->sp).pages_from_host_pre);
+	double wa = ((ssd->sp).pages_from_wl + (ssd->sp).pages_from_gc + (ssd->sp).pages_from_host) * 1.0 / ((ssd->sp).pages_from_host);
+	double ra = ((ssd->sp).pages_from_host_read + (ssd->sp).read_retry) * 1.0 / ((ssd->sp).pages_from_host_read);
+	FILE *fp_wara = fopen(path2wara, "a+");
+	fprintf(fp_wara, "%lf %lf\n", wa, ra);
+	fclose(fp_wara);
 
     /***Ziyang: end ***/
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);

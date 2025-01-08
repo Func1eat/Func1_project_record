@@ -356,6 +356,8 @@ struct ssd {
 };
 
 void ssd_init(FemuCtrl *n);
+int get_slc_ru_id(struct ssd *ssd, int i);
+int get_qlc_ru_id(struct ssd *ssd, int i);
 
 #ifdef FEMU_DEBUG_FTL
 #define ftl_debug(fmt, ...) \

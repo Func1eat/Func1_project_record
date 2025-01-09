@@ -300,6 +300,10 @@ typedef struct ru {
 	int mode;
 
 	double rand_rate; // rand_rate表示该ru中每个块的擦写次数上限等于标准的endurance * rand_rate
+
+	// 统计该ru当前的热度
+	uint64_t read_hotness;
+	uint64_t write_hotness; 
 } ru; 					
 
 struct ruh {				
@@ -353,6 +357,10 @@ struct ssd {
 	// 统计每个lpn的读写次数
 	int *lpnrtbl;
     int *lpnwtbl;
+	
+	// 统计每个lpn的当前热度
+	int *read_hotness;
+	int *write_hotness;
 };
 
 void ssd_init(FemuCtrl *n);

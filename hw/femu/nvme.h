@@ -1313,6 +1313,7 @@ typedef struct BbCtrlParams {
     int cv_enabled;
     int ru_mode;
     int read_migration;
+    int write_mode;
     int slc_op;
     int qlc_op;
 } BbCtrlParams;

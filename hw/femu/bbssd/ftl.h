@@ -214,11 +214,12 @@ struct ssdparams {
     double k;
     int gap; // 每次擦写增长的擦写次数（方便快速测试）
 
-    // 写放大相关
+    // 写放大和读放大相关
     uint64_t read_retry;
     uint64_t pages_from_host;
     uint64_t pages_from_gc;
     uint64_t pages_from_wl;
+    uint64_t pages_from_migrate;
     uint64_t pages_from_host_read;
 
     uint64_t read_retry_pre;
@@ -237,6 +238,9 @@ struct ssdparams {
 	int ru_mode;
 	//0表示不迁移，1表示根据读取次数做迁移，2表示根据页面类型和读取次数做迁移
 	int read_migration;
+
+	// 写入时决定以何种方式进行区域选择
+	int write_mode;
 
 	// 读延迟阈值，高于此阈值的数据会被迁移到slc
 	uint64_t read_latency_threshold;
@@ -302,8 +306,8 @@ typedef struct ru {
 	double rand_rate; // rand_rate表示该ru中每个块的擦写次数上限等于标准的endurance * rand_rate
 
 	// 统计该ru当前的热度
-	uint64_t read_hotness;
-	uint64_t write_hotness; 
+	double read_hotness;
+	double write_hotness; 
 } ru; 					
 
 struct ruh {				
@@ -325,6 +329,8 @@ struct fdp_ru_mgmt {
 	int full_ru_cnt; 
 	int bad_ru_cnt;
 	int ii_gc_ruid;			/* recalim unit for initially isolated gc */
+	uint64_t read_cnt;
+	uint64_t write_cnt;
 };							
 
 struct ssd {
@@ -359,8 +365,18 @@ struct ssd {
     int *lpnwtbl;
 	
 	// 统计每个lpn的当前热度
-	int *read_hotness;
-	int *write_hotness;
+	double *read_hotness;
+	double *write_hotness;
+	
+	// 记录当前热度最低的SLC块及其热度
+	int hotless_ru_id;
+	double hotless_ru_hotness;
+
+	// 当前寿命时期,作为热度衡量参数
+	int age;
+
+	// 记录read_req_migrate的迁移总数量
+	uint64_t migrate_count;
 };
 
 void ssd_init(FemuCtrl *n);

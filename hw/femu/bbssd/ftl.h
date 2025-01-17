@@ -330,6 +330,8 @@ struct fdp_ru_mgmt {
 	int bad_ru_cnt;
 	int ii_gc_ruid;			/* recalim unit for initially isolated gc */
 	uint64_t read_cnt;
+  uint64_t low_read_cnt;
+  uint64_t high_read_cnt;
 	uint64_t write_cnt;
 };							
 
@@ -371,6 +373,10 @@ struct ssd {
 	// 记录当前热度最低的SLC块及其热度
 	int hotless_ru_id;
 	double hotless_ru_hotness;
+
+  // 记录当前只考虑写热度最低的SLC块及其热度
+  int wr_hotless_ru_id;
+	double wr_hotless_ru_hotness;
 
 	// 当前寿命时期,作为热度衡量参数
 	int age;

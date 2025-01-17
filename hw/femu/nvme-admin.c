@@ -860,7 +860,7 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
 	double wa = ((ssd->sp).pages_from_wl + (ssd->sp).pages_from_gc + (ssd->sp).pages_from_host + (ssd->sp).pages_from_migrate) * 1.0 / ((ssd->sp).pages_from_host);
 	double ra = ((ssd->sp).pages_from_host_read + (ssd->sp).read_retry + (ssd->sp).pages_from_gc) * 1.0 / ((ssd->sp).pages_from_host_read);
 	FILE *fp_wara = fopen(path2wara, "a+");
-	fprintf(fp_wara, "wa:%lf ra:%lf migrate_count:%"PRIu64" slc_wc:%"PRIu64" slc_rc:%"PRIu64" qlc_wc:%"PRIu64" qlc_rc:%"PRIu64"\n", wa, ra, ssd->migrate_count, ssd->rums_slc[0].write_cnt, ssd->rums_slc[0].read_cnt, ssd->rums_qlc[0].write_cnt, ssd->rums_qlc[0].read_cnt);
+	fprintf(fp_wara, "wa:%lf ra:%lf migrate_count:%"PRIu64" slc_wc:%"PRIu64" slc_rc:%"PRIu64" qlc_wc:%"PRIu64" qlc_rc:%"PRIu64" low_rc:%"PRIu64" high_rc:%"PRIu64"\n", wa, ra, ssd->migrate_count, ssd->rums_slc[0].write_cnt, ssd->rums_slc[0].read_cnt, ssd->rums_qlc[0].write_cnt, ssd->rums_qlc[0].read_cnt, ssd->rums_qlc[0].low_read_cnt, ssd->rums_qlc[0].high_read_cnt);
 	fclose(fp_wara);
 
     /***Ziyang: end ***/

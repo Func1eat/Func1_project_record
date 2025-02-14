@@ -25,10 +25,10 @@ enum {
     NAND_SLC_READ_LAT = 23000,
     NAND_SLC_PROG_LAT = 80000,
     NAND_SLC_ERASE_LAT = 4000000,
-    NAND_QLC_READ_L_LAT = 24000,
-    NAND_QLC_READ_CL_LAT = 48000,
-    NAND_QLC_READ_CU_LAT = 144000,
-    NAND_QLC_READ_U_LAT = 144000,
+    NAND_QLC_READ_L_LAT = 72000,
+    NAND_QLC_READ_CL_LAT = 96000,
+    NAND_QLC_READ_CU_LAT = 96000,
+    NAND_QLC_READ_U_LAT = 96000,
     NAND_QLC_PROG_L_LAT = 460000,
     NAND_QLC_PROG_CL_LAT = 460000,
     NAND_QLC_PROG_CU_LAT = 460000,
@@ -202,6 +202,7 @@ struct ssdparams {
     // 磨损相关
     int endurance_slc;
 	int endurance_qlc;
+    double slc_alpha;
 
     double op;
     int enable_swl; // 是否开启静态磨损均衡
@@ -242,6 +243,9 @@ struct ssdparams {
 	// 写入时决定以何种方式进行区域选择
 	int write_mode;
 
+    // 磨损均衡方式
+    int wl_mode;
+    
 	// 读延迟阈值，高于此阈值的数据会被迁移到slc
 	uint64_t read_latency_threshold;
 };
@@ -300,10 +304,13 @@ typedef struct ru {
 	int ruhid;					/* needed for gc */
 	int rut;					/* ru type: normal, ii_gc, pi_gc */
 
-	int erase_cnt;
+	double erase; // 该RU的磨损度，等于pe_slc * alpha + pe_qlc, alpha为slc的擦写系数
+	int pe_slc; // 在slc模式下的擦写次数
+	int pe_qlc; // 在qlc模式下的擦写次数
 	int mode;
 
 	double rand_rate; // rand_rate表示该ru中每个块的擦写次数上限等于标准的endurance * rand_rate
+	double wear_condition; // 当前的磨损状况，由两种模式下的擦写次数计算而来
 
 	// 统计该ru当前的热度
 	double read_hotness;
@@ -330,8 +337,8 @@ struct fdp_ru_mgmt {
 	int bad_ru_cnt;
 	int ii_gc_ruid;			/* recalim unit for initially isolated gc */
 	uint64_t read_cnt;
-  uint64_t low_read_cnt;
-  uint64_t high_read_cnt;
+	uint64_t low_read_cnt;
+	uint64_t high_read_cnt;
 	uint64_t write_cnt;
 };							
 
@@ -374,8 +381,8 @@ struct ssd {
 	int hotless_ru_id;
 	double hotless_ru_hotness;
 
-  // 记录当前只考虑写热度最低的SLC块及其热度
-  int wr_hotless_ru_id;
+	// 记录当前只考虑写热度最低的SLC块及其热度
+	int wr_hotless_ru_id;
 	double wr_hotless_ru_hotness;
 
 	// 当前寿命时期,作为热度衡量参数

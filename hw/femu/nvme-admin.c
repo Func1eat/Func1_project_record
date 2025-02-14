@@ -828,20 +828,26 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
     char path2ec[80] = "ec.log";
 	char path2rwtbl[80] = "rwtbl.log";
 	char path2wara[80] = "wara.log";
+    char path2ecinfo[80] = "ec_info.log";
 
 	// 打印两个区域的平均pe次数
 	FILE *fp_ec = fopen(path2ec, "a+");
+    FILE *fp_ec_info = fopen(path2ecinfo, "w+");
 	struct fdp_ru_mgmt *rum_slc = ssd->rums_slc, *rum_qlc = ssd->rums_qlc;
 	struct ru *ru;
 	double erase_slc_cnt = 0, erase_qlc_cnt = 0;
+    fprintf(fp_ec_info, "slc:\n");
 	for (int j = 0; j < rum_slc->tt_rus; j ++) {
 		ru = &ssd->rus[get_slc_ru_id(ssd, j)];
-		erase_slc_cnt += ru->erase_cnt;
+		erase_slc_cnt += ru->erase;
+        fprintf(fp_ec_info, "%lf\n", ru->erase);
 	}
+    fprintf(fp_ec_info, "qlc:\n");
 	erase_slc_cnt /= rum_slc->tt_rus;
 	for (int j = 0; j < rum_qlc->tt_rus; j ++) {
 		ru = &ssd->rus[get_qlc_ru_id(ssd, j)];
-		erase_qlc_cnt += ru->erase_cnt;
+		erase_qlc_cnt += ru->erase;
+        fprintf(fp_ec_info, "%lf\n", ru->erase);
 	}
 	erase_qlc_cnt /= rum_qlc->tt_rus;
 	fprintf(fp_ec, "%lf %lf\n", erase_slc_cnt, erase_qlc_cnt);

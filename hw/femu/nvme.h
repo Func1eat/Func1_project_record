@@ -1314,6 +1314,7 @@ typedef struct BbCtrlParams {
     int ru_mode;
     int read_migration;
     int write_mode;
+    int wl_mode;
     int slc_op;
     int qlc_op;
 } BbCtrlParams;

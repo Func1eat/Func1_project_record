@@ -408,7 +408,7 @@ static int get_next_free_ruid(struct ssd *ssd, struct fdp_ru_mgmt *rum, int ruhi
 	QTAILQ_REMOVE(&rum->free_ru_list, ru_tmp, entry);
 	rum->free_ru_cnt--;
 
-	ftl_log("ru_id:%d ruhid:%d\n", ru_tmp->id, ruhid);
+	//ftl_log("ru_id:%d ruhid:%d\n", ru_tmp->id, ruhid);
 	return ru_tmp->id; 
 }
 
@@ -640,18 +640,18 @@ static void ssd_advance_fdp_write_pointer(struct ssd *ssd, uint16_t rgid, int lp
 				// 若当前是迁移后的ru写完了，则要新找一个存放迁移数据的ru
 				if (ru->rut == RU_TYPE_II_GC) {
 					rum->ii_gc_ruid = get_next_free_ruid(ssd, rum, ruhid);
-					ftl_log("ii\n");
+					//("ii\n");
 					ssd->rus[rum->ii_gc_ruid].rut = RU_TYPE_II_GC;
 				}
 				else if (ru->rut == RU_TYPE_PI_GC) {
 					ruh->pi_gc_ruids[rgid] = get_next_free_ruid(ssd, rum, ruhid);
-					ftl_log("pi\n");
+					//ftl_log("pi\n");
 					ssd->rus[ruh->pi_gc_ruids[rgid]].rut = RU_TYPE_PI_GC;
 				}
 				else {
 					// 若是正常写的ru完了，就要更新ruh当前指向的ru
 					ruh->cur_ruids[rgid] = get_next_free_ruid(ssd, rum, ruhid);
-					ftl_log("normal\n");
+					//ftl_log("normal\n");
 					ssd->rus[ruh->cur_ruids[rgid]].rut = RU_TYPE_NORMAL;
 				} 
 				check_addr(ru->wp.blk, spp->blks_per_pl);
@@ -946,7 +946,7 @@ void ssd_init(FemuCtrl *n)
 	ssd->wr_hotless_ru_id = 0;
 	ssd->migrate_count = 0;
 
-	double age_rate = 0.4;
+	double age_rate = 0.45;
 	ssd_aged(ssd, age_rate);
     qemu_thread_create(&ssd->ftl_thread, "FEMU-FTL-Thread", ftl_thread, n,
                        QEMU_THREAD_JOINABLE);

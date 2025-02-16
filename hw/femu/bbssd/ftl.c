@@ -1598,7 +1598,7 @@ static int fdp_clean_one_block(struct ssd *ssd, struct ppa *ppa, uint16_t rgid, 
             /* delay the maptbl update until "write" happens */
 			// 当gc效率较低时，将gc需要迁移的数据放置在qlc中
 			if (migrate_flag == 1)
-            	fdp_gc_write_page(ssd, ppa, rgid, 3);
+            	fdp_gc_write_page(ssd, ppa, rgid, 2);
 			else
 				fdp_gc_write_page(ssd, ppa, rgid, ruhid);
             cnt++;
@@ -1977,15 +1977,14 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 		QTAILQ_INSERT_TAIL(&rum->bad_ru_list, victim_ru, entry);
 		rum->bad_ru_cnt++;
 		ftl_log("Ru %d becomes bad!\n", victim_ru->id);
-
-		if (ssd->cv_moderate == 0) {
-            double eop = ((rum->tt_rus - rum->bad_ru_cnt)*ssd->sp.pgs_per_line - util)/util;
-			ftl_log("eop:%lf\n", eop);
-            if (eop < ssd->sp.op) {
-            //if (eop < 1) {    
-				ssd->cv_moderate = 1;
-				output_info_log(ssd);
-            }
+		int cur_slc_ru = ssd->rums_slc[0].tt_rus - ssd->rums_slc[0].bad_ru_cnt;
+		int cur_qlc_ru = ssd->rums_qlc[0].tt_rus - ssd->rums_qlc[0].bad_ru_cnt;
+		double eop = (cur_slc_ru / 4.0 + cur_qlc_ru) / ssd->sp.tt_rus;
+		ftl_log("eop:%lf\n", eop);
+		if (eop < (spp->qlc_op * 1.0 / (spp->slc_op + spp->qlc_op))) {
+			output_info_log(ssd);
+			ftl_err("SSD reaches its end of the life!\n");
+			abort();	
 		}
 	} else {
 		// 静态磨损均衡，把最低磨损的ru数据迁移到当前已被gc的ru中，然后低磨损ru插入free_ru_list
@@ -2495,11 +2494,15 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 		}
 
 		// 根据类型指定ruhid
-		if (ruhid == 0) {
+		if (ruhid == 0 ||  ruhid == 1 ||  ruhid == 2) {
 			if (write_flag)
 				ruhid = 2;
-			else
-				ruhid = 0;
+			else {
+				if (ssd->read_hotness[lpn] > ssd->write_hotness[lpn])
+					ruhid = 1;
+				else
+					ruhid = 0;
+			}
 		}
 
 		if (ruhid == 2)

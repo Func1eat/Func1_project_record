@@ -161,6 +161,9 @@ struct ssdparams {
 	int slc_op;
 	int qlc_op;
 
+	double util_ratio_high;
+	double util_ratio_low;
+
     bool enable_gc_delay;
 
     /* below are all calculated values */
@@ -340,6 +343,7 @@ struct fdp_ru_mgmt {
 	uint64_t low_read_cnt;
 	uint64_t high_read_cnt;
 	uint64_t write_cnt;
+	uint64_t valid_page_num;
 };							
 
 struct ssd {
@@ -390,6 +394,16 @@ struct ssd {
 
 	// 记录read_req_migrate的迁移总数量
 	uint64_t migrate_count;
+
+	// 记录当前写入判定是否进入SLC区域的请求大小阈值
+	int page_size_thre;
+
+	// 两个区域当前的磨损程度，用于计算磨损速率
+	int pe_slc;
+	int pe_qlc;
+
+	// 热度比例，用于改变写入两个区域的速率
+	double hot_ratio;
 };
 
 void ssd_init(FemuCtrl *n);

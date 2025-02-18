@@ -39,7 +39,7 @@
 #define NVME_MAX_NAMESPACES 1			
 #define NVME_MAX_ENDGRPS	1			
 #define MAX_RUHS			4
-#define RG_DEGREE			64
+#define RG_DEGREE			16
 #define WAF_TEST
 
 typedef struct NvmeReclaimUnit {	
@@ -1317,6 +1317,9 @@ typedef struct BbCtrlParams {
     int wl_mode;
     int slc_op;
     int qlc_op;
+
+    int util_ratio_low;
+    int util_ratio_high;
 } BbCtrlParams;
 
 typedef struct ZNSCtrlParams {

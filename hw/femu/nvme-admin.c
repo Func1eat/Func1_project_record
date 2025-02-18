@@ -843,14 +843,13 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
         fprintf(fp_ec_info, "%lf\n", ru->erase);
 	}
     fprintf(fp_ec_info, "qlc:\n");
-	erase_slc_cnt /= rum_slc->tt_rus;
 	for (int j = 0; j < rum_qlc->tt_rus; j ++) {
 		ru = &ssd->rus[get_qlc_ru_id(ssd, j)];
 		erase_qlc_cnt += ru->erase;
         fprintf(fp_ec_info, "%lf\n", ru->erase);
 	}
-	erase_qlc_cnt /= rum_qlc->tt_rus;
-	fprintf(fp_ec, "%lf %lf\n", erase_slc_cnt, erase_qlc_cnt);
+	double erase_ratio = erase_slc_cnt * 27.0 / (erase_qlc_cnt * 80.0);
+	fprintf(fp_ec, "%lf %lf %lf\n", erase_slc_cnt, erase_qlc_cnt, erase_ratio);
 	fclose(fp_ec);
 
 	// 打印rwtbl

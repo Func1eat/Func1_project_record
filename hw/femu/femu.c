@@ -783,6 +783,8 @@ static Property femu_props[] = {
     DEFINE_PROP_INT32("ru_mode", FemuCtrl, bb_params.ru_mode, 1),
     DEFINE_PROP_INT32("slc_op", FemuCtrl, bb_params.slc_op, 25),
     DEFINE_PROP_INT32("qlc_op", FemuCtrl, bb_params.qlc_op, 75),
+    DEFINE_PROP_INT32("util_ratio_low", FemuCtrl, bb_params.util_ratio_low, 60),
+    DEFINE_PROP_INT32("util_ratio_high", FemuCtrl, bb_params.util_ratio_high, 70),
     DEFINE_PROP_END_OF_LIST(),
 };
 

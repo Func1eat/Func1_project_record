@@ -29,6 +29,10 @@ enum {
     NAND_QLC_READ_CL_LAT = 96000,
     NAND_QLC_READ_CU_LAT = 96000,
     NAND_QLC_READ_U_LAT = 96000,
+	// NAND_QLC_READ_L_LAT = 24000,
+  //   NAND_QLC_READ_CL_LAT = 48000,
+  //   NAND_QLC_READ_CU_LAT = 144000,
+  //   NAND_QLC_READ_U_LAT = 144000,
     NAND_QLC_PROG_L_LAT = 460000,
     NAND_QLC_PROG_CL_LAT = 460000,
     NAND_QLC_PROG_CU_LAT = 460000,
@@ -394,6 +398,9 @@ struct ssd {
 
 	// 记录read_req_migrate的迁移总数量
 	uint64_t migrate_count;
+
+  // 记录slc到qlc migrate的迁移总数量
+	uint64_t write_migrate_count;
 
 	// 记录当前写入判定是否进入SLC区域的请求大小阈值
 	int page_size_thre;

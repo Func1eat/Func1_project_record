@@ -2606,7 +2606,9 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 			write_flag = 1;
 		}
 
+		int ppa_map_flag = 0;
         if (mapped_ppa(&ppa)) {
+			ppa_map_flag = 1;
             /* update old page information first */
 			uint16_t old_rgid = (ppa.g.ch * spp->luns_per_ch + ppa.g.lun) / RG_DEGREE;
 			mark_page_invalid(ssd, &ppa, old_rgid); 
@@ -2627,11 +2629,17 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 			if (slc_util < 0.3) {
 				comp_hotness = 0;
 			} else if (slc_util < ssd->sp.util_ratio_low) {
-				comp_hotness = ratio * ssd->wr_hotless_ru_hotness * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
+				if (ppa_map_flag)
+					comp_hotness = 0;
+				else
+					comp_hotness = ratio * ssd->wr_hotless_ru_hotness * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
 			// } else if (slc_util < ssd->sp.util_ratio_high - 0.02) {
 			// 	comp_hotness = ssd->wr_hotless_ru_hotness * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
 			} else {
-				comp_hotness = ratio * ssd->wr_hotless_ru_hotness * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT) + NAND_SLC_READ_LAT + NAND_QLC_PROG_CL_LAT;
+				if (ppa_map_flag)
+					comp_hotness =  ratio * ssd->wr_hotless_ru_hotness * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
+				else
+					comp_hotness = ratio * ssd->wr_hotless_ru_hotness * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT) + NAND_SLC_READ_LAT + NAND_QLC_PROG_CL_LAT;
 			}
 			if ((ssd->write_hotness[lpn] >= 1) && (cur_hotness > comp_hotness))
 				write_flag = 0;
@@ -2649,11 +2657,17 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 			if (slc_util < 0.3) {
 				comp_hotness = 0;
 			} else if (slc_util < ssd->sp.util_ratio_low) {
-				comp_hotness = ratio * ssd->hotless_ru_hotness;
+				if (ppa_map_flag)
+					comp_hotness = 0;
+				else
+					comp_hotness = ratio * ssd->hotless_ru_hotness;
 			// } else if (slc_util < ssd->sp.util_ratio_high - 0.02) {
 			// 	comp_hotness = ssd->hotless_ru_hotness;
 			} else {
-				comp_hotness = ratio * ssd->hotless_ru_hotness +  NAND_SLC_READ_LAT + NAND_QLC_PROG_CL_LAT;
+				if (ppa_map_flag)
+					comp_hotness = ratio * ssd->hotless_ru_hotness;
+				else
+					comp_hotness = ratio * ssd->hotless_ru_hotness +  NAND_SLC_READ_LAT + NAND_QLC_PROG_CL_LAT;
 			}
 			if ((ssd->write_hotness[lpn] >= 1 || ssd->read_hotness[lpn] >= 2) && (cur_hotness > comp_hotness))
 				write_flag = 0;

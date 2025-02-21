@@ -411,6 +411,14 @@ struct ssd {
 
 	// 热度比例，用于改变写入两个区域的速率
 	double hot_ratio;
+
+	double qlc_migrate_hotness;
+	int qlc_migrate_cnt;
+	double avg_qlc_gc_hotness;
+	
+	int gc_total_cnt;
+	int gc_valid_cnt;
+	double gc_ratio;
 };
 
 void ssd_init(FemuCtrl *n);

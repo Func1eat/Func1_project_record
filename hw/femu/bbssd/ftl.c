@@ -952,7 +952,7 @@ void ssd_init(FemuCtrl *n)
 
 	ssd->read_hotness = g_malloc0(spp->tt_pgs * sizeof(double));
 	ssd->write_hotness = g_malloc0(spp->tt_pgs * sizeof(double));
-	ssd->age = 4;
+	ssd->age = 2;
 	ssd->hotless_ru_hotness = 0;
 	ssd->hotless_ru_id = 0;
 	ssd->wr_hotless_ru_hotness = 0;
@@ -1158,8 +1158,12 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
 		// int bits_count = spp->secs_per_pg * spp->secsz * 8;
 		
 		int read_retry = 0;
-		if (c == NAND_QLC_READ_U || c == NAND_QLC_READ_CU)
-			read_retry = ssd->age - 1;
+		if (ssd->age == 2) {
+			if (c == NAND_QLC_READ_L)
+				read_retry = 1;
+			else if ( c != NAND_SLC_READ)
+				read_retry = 2;
+		}
 		
 		// while ((int)(bits_count * rber) > spp->ecc_corr_str) {
 		// 	rber /= 2.0;

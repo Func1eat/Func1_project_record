@@ -1,5 +1,5 @@
 #include "ftl.h"
-
+#include "stdbool.h"
 //#define FEMU_DEBUG_FTL
 //#define FDP_DEBUG
 
@@ -9,6 +9,18 @@ static void read_req_migrate(struct ssd *ssd, uint64_t lpn);
 static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, int gc_flag);
 static inline struct ru *get_ru(struct ssd *ssd, struct ppa *ppa);
 static void ssd_aged(struct ssd *ssd, double age_rate);
+
+static double get_ru_victim_pre(struct ssd *ssd, struct ru *ru) {
+	double victim_pre = 0;
+	// if (ssd->sp.write_mode == 2) {
+	// 	victim_pre = (ru->read_hotness * (ssd->avg_qlc_read_lat - NAND_SLC_READ_LAT) + ru->write_hotness * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT)) / ru->vpc + ru->vpc;
+	// }
+	// else if (ssd->sp.write_mode == 1)
+	// 	victim_pre = ru->write_hotness;
+	// else if (ssd->sp.write_mode == 0)
+		victim_pre = ru->vpc;
+	return victim_pre;
+}
 
 static inline double add_hotness (double h) {
 	return h < 15.0 ? h + 1 : 16.0;
@@ -63,9 +75,6 @@ static inline void set_maptbl_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa
 {
     ftl_assert(lpn < ssd->sp.tt_pgs);
     ssd->maptbl[lpn] = *ppa;
-	struct ru *new_ru = get_ru(ssd, ppa);
-	new_ru->read_hotness += ssd->read_hotness[lpn];
-	new_ru->write_hotness += ssd->write_hotness[lpn];
 	//ftl_log("lpn:%"PRIu64", , ruid:%d, read_hotness: %lf, write_hotness: %lf\n", lpn, new_ru->id, new_ru->read_hotness, new_ru->write_hotness);
 }
 
@@ -164,14 +173,25 @@ static inline int victim_ru_cmp_pri(pqueue_pri_t next, pqueue_pri_t curr)
     return (next > curr);
 }
 
+// static inline pqueue_pri_t victim_ru_get_pri(void *a)		
+// {
+//     return ((struct ru *)a)->vpc;
+// }
+
+// static inline void victim_ru_set_pri(void *a, pqueue_pri_t pri)
+// {
+//     ((struct ru *)a)->vpc = pri;
+// }
+
+// 综合考虑热度和无效页个数
 static inline pqueue_pri_t victim_ru_get_pri(void *a)		
 {
-    return ((struct ru *)a)->vpc;
+    return ((struct ru *)a)->victim_pre;
 }
 
 static inline void victim_ru_set_pri(void *a, pqueue_pri_t pri)
 {
-    ((struct ru *)a)->vpc = pri;
+    ((struct ru *)a)->victim_pre = pri;
 }
 
 static inline size_t victim_ru_get_pos(void *a)
@@ -261,7 +281,13 @@ static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 		rum_slc->write_cnt = 0;
 		rum_qlc->read_cnt = 0;
 		rum_qlc->write_cnt = 0;
-		
+
+		rum_slc->read_ru_cnt = 0;
+		rum_qlc->read_ru_cnt = 0;
+
+		rum_slc->write_ru_cnt = 0;
+		rum_qlc->write_ru_cnt = 0;
+
 		// 生成所有ru的信息
 		for (int j = 0; j < spp->tt_rus; j++) {
 			ru = &ssd->rus[j];
@@ -279,6 +305,7 @@ static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 			ru->pe_qlc = 0;
 			ru->read_hotness = 0;
 			ru->write_hotness = 0;
+			ru->victim_pre = 0;
 			ru->rut = RU_TYPE_NORMAL;
 			ru->rand_rate = min + (double) rand() / (double)RAND_MAX * (max - min);
 			// to do 先全保持一致
@@ -336,9 +363,6 @@ static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 // 从该rg的free_ru_list里取下一个
 static int get_next_free_ruid(struct ssd *ssd, struct fdp_ru_mgmt *rum, int ruhid)
 {
-#ifdef FDP_DEBUG
-	printf("get_next_free_ruid() called -> ");
-#endif
 	struct ru *retru = NULL;
 
 	retru = QTAILQ_FIRST(&rum->free_ru_list);
@@ -413,10 +437,19 @@ static int get_next_free_ruid(struct ssd *ssd, struct fdp_ru_mgmt *rum, int ruhi
 	// 		}
 	// 	}
 	// }
-
+	if (ru_tmp->mode == 0 && ruhid == 0) {
+		rum->write_ru_cnt ++;
+		ru_tmp->ruhid = 0;
+	}
+	else if (ru_tmp->mode == 0 && ruhid == 1) {
+		rum->read_ru_cnt ++;
+		ru_tmp->ruhid = 1;
+	}
 	QTAILQ_REMOVE(&rum->free_ru_list, ru_tmp, entry);
 	rum->free_ru_cnt--;
-
+	
+	if (ruhid == 1 && rum->read_ru_cnt >= ssd->sp.ra_max_cnt)
+		ssd->ra_full_flag = 1;
 	//ftl_log("ru_id:%d ruhid:%d\n", ru_tmp->id, ruhid);
 	return ru_tmp->id; 
 }
@@ -644,22 +677,25 @@ static void ssd_advance_fdp_write_pointer(struct ssd *ssd, uint16_t rgid, int lp
 				}
 
 				check_addr(ru->wp.blk, spp->blks_per_pl); 
-				// 存下写入该ru的ruhid，方便后续找迁移的ru
-				ru->ruhid = ruhid; 
 				// 若当前是迁移后的ru写完了，则要新找一个存放迁移数据的ru
+				int new_ru_id = get_next_free_ruid(ssd, rum, ruhid);
+				// if (new_ru_id == -1) {
+				// 	ssd->read_area_full_flag = 0;
+				// 	return;
+				// }
 				if (ru->rut == RU_TYPE_II_GC) {
-					rum->ii_gc_ruid = get_next_free_ruid(ssd, rum, ruhid);
+					rum->ii_gc_ruid = new_ru_id;
 					//("ii\n");
 					ssd->rus[rum->ii_gc_ruid].rut = RU_TYPE_II_GC;
 				}
 				else if (ru->rut == RU_TYPE_PI_GC) {
-					ruh->pi_gc_ruids[rgid] = get_next_free_ruid(ssd, rum, ruhid);
+					ruh->pi_gc_ruids[rgid] = new_ru_id;
 					//ftl_log("pi\n");
 					ssd->rus[ruh->pi_gc_ruids[rgid]].rut = RU_TYPE_PI_GC;
 				}
 				else {
 					// 若是正常写的ru完了，就要更新ruh当前指向的ru
-					ruh->cur_ruids[rgid] = get_next_free_ruid(ssd, rum, ruhid);
+					ruh->cur_ruids[rgid] = new_ru_id;
 					//ftl_log("normal\n");
 					ssd->rus[ruh->cur_ruids[rgid]].rut = RU_TYPE_NORMAL;
 				} 
@@ -779,6 +815,9 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
 	spp->util_ratio_high = n->bb_params.util_ratio_high * 1.0 / 100;
 	spp->util_ratio_low = n->bb_params.util_ratio_low * 1.0 / 100;
 
+	spp->balance_ratio = n->bb_params.balance_ratio * 1.0 / 100;
+	spp->unbalance_ratio = 1 - spp->balance_ratio;
+
     /* line is special, put it at the end */
     spp->blks_per_line = spp->tt_luns; /* TODO: to fix under multiplanes */
     spp->pgs_per_line = spp->blks_per_line * spp->pgs_per_blk;
@@ -836,6 +875,7 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
 	spp->write_mode = n->bb_params.write_mode;
 	spp->wl_mode = n->bb_params.wl_mode;
 	spp->read_latency_threshold = 2 * NAND_QLC_READ_CU_LAT;
+	spp->ra_max_cnt = 10;
     check_params(spp);
 }
 
@@ -963,6 +1003,22 @@ void ssd_init(FemuCtrl *n)
 	ssd->pe_slc = 0;
 	ssd->hot_ratio = 1;
 	ssd->page_size_thre = 1;
+	ssd->qlc_gc_eff = 0;
+	ssd->slc_gc_eff = 0;
+	// ssd->gc_func_left = 0;
+	// ssd->gc_func_right = 0;
+	// ssd->has_do_qlc_gc = 0;
+	// ssd->has_do_slc_gc = 0;
+	ssd->cnt_window = 0;
+	ssd->ra_full_flag = 0;
+
+	if (ssd->age == 2) {
+		double avg_qlc_unbalance_read_lat = (QLC_U_1_R + QLC_U_2_R + MID_READ_U_RETRY * QLC_U_3_R  + MID_READ_U_RETRY * QLC_U_4_R) * 1.0/ 4;
+		double avg_qlc_balance_read_lat = MID_READ_RETRY * (QLC_1_R + QLC_2_R + QLC_3_R  + QLC_4_R) * 1.0/ 4;
+		ssd->avg_qlc_read_lat = avg_qlc_balance_read_lat * ssd->sp.balance_ratio + avg_qlc_unbalance_read_lat * ssd->sp.unbalance_ratio;
+		ftl_log("avg_qlc_read_lat:%lf,avg_qlc_balance_read_lat:%lf,avg_qlc_unbalance_read_lat:%lf\n", ssd->avg_qlc_read_lat, avg_qlc_balance_read_lat, avg_qlc_unbalance_read_lat);
+	}
+
 	double age_rate = 0.8;
 	ssd_aged(ssd, age_rate);
     qemu_thread_create(&ssd->ftl_thread, "FEMU-FTL-Thread", ftl_thread, n,
@@ -1035,7 +1091,7 @@ static inline struct nand_page *get_pg(struct ssd *ssd, struct ppa *ppa)
     return &(blk->pg[ppa->g.pg]);
 }
 
-static inline bool if_satisfy_migrate(struct ssd *ssd, struct ppa *ppa, int read_retry) {
+static inline bool if_satisfy_migrate(struct ssd *ssd, struct ppa *ppa) {
 	int migrate_mode = ssd->sp.read_migration;
 	if (migrate_mode == 0)
 		return false;
@@ -1057,40 +1113,43 @@ static inline bool if_satisfy_migrate(struct ssd *ssd, struct ppa *ppa, int read
 	// 根据自定义的热度判断是否需要迁移
 	if (migrate_mode == 3) {
 		int page_type = ppa->g.pg % 4;
-		uint64_t read_page_lat;
-		if (page_type == 0)
-			read_page_lat = NAND_QLC_READ_L_LAT;
-		else if (page_type == 1)
-			read_page_lat = NAND_QLC_READ_CL_LAT;
-		else if (page_type == 2)
-			read_page_lat = NAND_QLC_READ_CU_LAT;
-		else
-			read_page_lat = NAND_QLC_READ_U_LAT;
+		int page_balance_type = (ppa->g.pg / 4) % 100 < ssd->sp.balance_ratio * 100 ? 0 : 1;
+		double read_page_lat;
+		if (page_balance_type == 0) {
+			if (page_type == 0)
+				read_page_lat = QLC_1_R * MID_READ_RETRY;
+			else if (page_type == 1)
+				read_page_lat = QLC_2_R * MID_READ_RETRY;
+			else if (page_type == 2)
+				read_page_lat = QLC_3_R * MID_READ_RETRY;
+			else
+				read_page_lat = QLC_4_R * MID_READ_RETRY;
+		} else {
+			if (page_type == 0)
+				read_page_lat = QLC_1_R * MID_READ_RETRY;
+			else if (page_type == 1)
+				read_page_lat = QLC_1_R * MID_READ_RETRY;
+			else if (page_type == 2)
+				read_page_lat = QLC_1_R * MID_READ_RETRY;
+			else
+				read_page_lat = QLC_1_R * MID_READ_RETRY;
+		}
 
 		// 被迁移的页热度
-		double cur_hotness = ssd->read_hotness[lpn] * (read_page_lat * (1 +  read_retry) - NAND_SLC_READ_LAT) + ssd->write_hotness[lpn] * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
+		double cur_hotness = ssd->read_hotness[lpn] * (read_page_lat - SLC_R) + ssd->write_hotness[lpn] * (QLC_W - SLC_W);
+		// if (ssd->v_write <= ssd->v_gc) {
+		// 	if (cur_hotness > NAND_SLC_PROG_LAT)
+		// 		return true;
+		// 	else
+		// 		return false;
+		// } else {
+		double cur_slc_ra_avg_hotness =  ssd->slc_valid_cnt == 0 ? 0 : ssd->total_slc_ra_read_hotness  / ssd->slc_valid_cnt * (ssd->avg_qlc_read_lat - SLC_R) + ssd->total_slc_ra_write_hotness/ ssd->slc_valid_cnt * (QLC_W - SLC_W);
 
-		double slc_util = ssd->rums_slc[0].valid_page_num * 4.0 / (ssd->rums_slc[0].tt_rus * ssd->sp.pgs_per_ru);
-		//ftl_log("slc_util:%lf\n", slc_util);
-		double ratio = 2.0;
-		double comp_hotness = 0;
-		if (slc_util < 0.3) {
-			comp_hotness = NAND_SLC_PROG_LAT;
-		} else if (slc_util < ssd->sp.util_ratio_low) {
-			comp_hotness = ratio * ssd->hotless_ru_hotness + NAND_SLC_PROG_LAT;;
-		// } else if (slc_util < ssd->sp.util_ratio_high - 0.02) {
-		// 	comp_hotness = ssd->hotless_ru_hotness + NAND_SLC_PROG_LAT;
-		} else {
-			comp_hotness = ratio * ssd->hotless_ru_hotness + NAND_SLC_READ_LAT + NAND_SLC_PROG_LAT + NAND_QLC_PROG_L_LAT;
-		}
-
-		// 比较被迁移的页和由于迁移而被驱逐的页热度以及驱逐的代价，评价是否做迁移
-		if (ssd->read_hotness[lpn] >= 2 && cur_hotness > ratio * comp_hotness && ssd->write_hotness[lpn] < 2)  {
-			//ftl_log("%lf read hotness:%lf write_hotness:%lf read_retry:%d %d\n", cur_hotness, ssd->read_hotness[lpn], ssd->write_hotness[lpn], read_retry, page_type);
+		if ((ssd->ra_full_flag == 0 && cur_hotness >= cur_slc_ra_avg_hotness + SLC_W) ||(ssd->ra_full_flag != 0 && cur_hotness >= cur_slc_ra_avg_hotness + QLC_W + SLC_R + SLC_W))
 			return true;
-		}
 		else
 			return false;
+		// }
 	}
 	return false;
 }
@@ -1113,68 +1172,62 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
 		operation_lat = NAND_SLC_PROG_LAT;
     else if (c == NAND_SLC_ERASE)
 		operation_lat = NAND_SLC_ERASE_LAT;
-    else if (c == NAND_QLC_READ_L)
-		operation_lat = NAND_QLC_READ_L_LAT;
-    else if (c == NAND_QLC_READ_CL)
+    else if (c == NAND_QLC_READ) {
 		operation_lat = NAND_QLC_READ_CL_LAT;
-    else if (c == NAND_QLC_READ_CU)
-		operation_lat = NAND_QLC_READ_CU_LAT;
-    else if (c == NAND_QLC_READ_U)
-		operation_lat = NAND_QLC_READ_U_LAT;
-    else if (c == NAND_QLC_PROG_L)
-		operation_lat = NAND_QLC_PROG_L_LAT;
-    else if (c == NAND_QLC_PROG_CL)
+	}
+    else if (c == NAND_QLC_PROG) {
 		operation_lat = NAND_QLC_PROG_CL_LAT;
-    else if (c == NAND_QLC_PROG_CU)
-		operation_lat = NAND_QLC_PROG_CU_LAT;
-    else if (c == NAND_QLC_PROG_U)
-		operation_lat = NAND_QLC_PROG_U_LAT;
-	else if (c == NAND_QLC_PROG_TOTAL)
-		operation_lat = NAND_QLC_PROG_TOTAL_LAT;
+	}	
     else if (c == NAND_QLC_ERASE)
 		operation_lat = NAND_QLC_ERASE_LAT;
 
-	if (c == NAND_SLC_READ || c == NAND_QLC_READ_U || c == NAND_QLC_READ_CU || c == NAND_QLC_READ_CL || c == NAND_QLC_READ_L){
+	if (c == NAND_SLC_READ || c == NAND_QLC_READ){
 		// 算读重试次数
         nand_stime = (lun->next_lun_avail_time < cmd_stime) ? cmd_stime : \
                      lun->next_lun_avail_time;
-		
-		// ec表示耐磨度，等于当前擦除次数除以rand_rate
-        // double ec = (double)cur_ru->erase_cnt / cur_ru->rand_rate;
-		
-		// 分别计算不同类型页的磨损程度 qlc根据页类型，slc要乘以磨损比例
-		// if (c == NAND_SLC_READ) {
-		// 	ec = ec / spp->endurance_slc * spp->endurance_qlc;
-		// } else if (c == NAND_QLC_READ_CL) {
-		// 	ec = ec * 2;
-		// } else if (c == NAND_QLC_READ_CU) {
-		// 	ec = ec * 6;
-		// } else if (c == NAND_QLC_READ_U) {
-		// 	ec = ec * 6;
-		// }
 
-		// double rber = spp->epsilon + spp->alpha*pow(ec,spp->k);
-		// rber = rber > 1.0 ? 1.0 : rber;
-		// int bits_count = spp->secs_per_pg * spp->secsz * 8;
-		
 		int read_retry = 0;
-		if (ssd->age == 2) {
-			if (c == NAND_QLC_READ_L)
-				read_retry = 1;
-			else if ( c != NAND_SLC_READ)
-				read_retry = 2;
+		if(ssd->age == 2 && c == NAND_QLC_READ) {
+			int page_type = ppa->g.pg % 4;
+			int page_balance_type = (ppa->g.pg / 4) % 100 < ssd->sp.balance_ratio * 100 ? 0 : 1;
+			if (page_balance_type == 0) {
+				if (page_type == 0) {
+					operation_lat = NAND_QLC_READ_L_LAT * 2;
+					read_retry = 1;
+				}
+				else if (page_type == 1) {
+					operation_lat = NAND_QLC_READ_CL_LAT * 3;
+					read_retry = 2;
+				}
+				else if (page_type == 2) {
+					operation_lat = NAND_QLC_READ_CU_LAT * 3;
+					read_retry = 2;
+				}
+				else {
+					operation_lat = NAND_QLC_READ_U_LAT * 3;
+					read_retry = 2;
+				}
+			} else {
+				if (page_type == 0)
+					operation_lat = NAND_QLC_READ_L_LAT;
+				else if (page_type == 1)
+					operation_lat = NAND_QLC_READ_CL_LAT;
+				else if (page_type == 2) {
+					operation_lat = NAND_QLC_READ_CU_LAT * 7;
+					read_retry = 6;
+				}
+				else {
+ 					operation_lat = NAND_QLC_READ_U_LAT * 7;
+					read_retry = 6;
+				}
+			}
 		}
-		
-		// while ((int)(bits_count * rber) > spp->ecc_corr_str) {
-		// 	rber /= 2.0;
-		// 	read_retry += 1;
-		// }
+
 		spp->read_retry += read_retry;
-		uint64_t req_lat = operation_lat * (1 + read_retry);
-        lun->next_lun_avail_time = nand_stime + req_lat;
+        lun->next_lun_avail_time = nand_stime + operation_lat;
 
 		// 读取操作发生在QLC区域且满足条件
-		if (c != NAND_SLC_READ && if_satisfy_migrate(ssd, ppa, read_retry)){
+		if (c != NAND_SLC_READ && if_satisfy_migrate(ssd, ppa)){
 			uint64_t lpn = get_rmap_ent(ssd, ppa);
 			//ftl_log("lpn: %"PRIu64" read latency:%"PRIu64"\n", lpn, req_lat);
 			//ftl_log("begin read migrate\n");
@@ -1208,6 +1261,16 @@ static void mark_page_invalid(struct ssd *ssd, struct ppa *ppa, uint16_t rgid)
 	ru->read_hotness -= ssd->read_hotness[lpn];
 	ru->write_hotness -= ssd->write_hotness[lpn];
 
+	if (ru->mode == 0) { 
+		if (ru->ruhid == 0) {
+			ssd->total_slc_wa_write_hotness -= ssd->write_hotness[lpn];
+			ssd->total_slc_wa_read_hotness -= ssd->read_hotness[lpn];
+		} else if (ru->ruhid == 1) {
+			ssd->total_slc_ra_read_hotness -= ssd->read_hotness[lpn];
+			ssd->total_slc_ra_write_hotness -= ssd->write_hotness[lpn];
+		}
+		ssd->slc_valid_cnt -= 1;
+	}
 	//ftl_log("lpn:%"PRIu64", ruid:%d read_hotness: %lf, write_hotness: %lf\n", lpn, ru->id, ru->read_hotness, ru->write_hotness);
 
     /* update corresponding page status */
@@ -1247,9 +1310,12 @@ static void mark_page_invalid(struct ssd *ssd, struct ppa *ppa, uint16_t rgid)
 		/* Adjust the position of the victime ru in the pq under over-writes */
 		if (ru->pos) {
 			/* Note that ru->vpc will be updated by this call */
-			pqueue_change_priority(rum->victim_ru_pq, ru->vpc - pages_per_wl, ru);
+			ru->vpc -= pages_per_wl;
+			double cur_victim_pre = get_ru_victim_pre(ssd, ru);
+			pqueue_change_priority(rum->victim_ru_pq, cur_victim_pre, ru);
 		} else {
-			ru->vpc-=pages_per_wl;
+			ru->vpc -= pages_per_wl;
+			ru->victim_pre = get_ru_victim_pre(ssd, ru);
 		}
 
 		if (was_full_ru) {
@@ -1318,9 +1384,23 @@ static void mark_page_valid(struct ssd *ssd, struct ppa *ppa)
 
     /* update corresponding ru status */
 	if (ssd->fdp_enabled) {
+		uint64_t lpn = get_rmap_ent(ssd, ppa);
 		ru = get_ru(ssd, ppa);
 		ftl_assert(ru->vpc >= 0 && ru->vpc < ssd->sp.pgs_per_ru);
-		ru->vpc+=page_per_wl; 
+		ru->vpc+=page_per_wl;
+		ru->read_hotness += ssd->read_hotness[lpn];
+		ru->write_hotness += ssd->write_hotness[lpn];
+		ru->victim_pre = get_ru_victim_pre(ssd, ru);
+		if (ru->mode == 0) {
+			if (ru->ruhid == 0) {
+				ssd->total_slc_wa_write_hotness += ssd->write_hotness[lpn];
+				ssd->total_slc_wa_read_hotness += ssd->read_hotness[lpn];
+			} else if (ru->ruhid == 1) {
+				ssd->total_slc_ra_write_hotness += ssd->write_hotness[lpn];
+				ssd->total_slc_ra_read_hotness += ssd->read_hotness[lpn];
+			}
+			ssd->slc_valid_cnt += 1;
+		}
 	}
     /* update corresponding line status */
 	else {
@@ -1362,15 +1442,7 @@ static void gc_read_page(struct ssd *ssd, struct ppa *ppa)
         if (mode == 0)
         	gcr.cmd = NAND_SLC_READ;
 		else {
-			int page_type = ppa->g.pg % 4;
-			if (page_type == 0)
-            	gcr.cmd = NAND_QLC_READ_L;
-          	else if (page_type == 1)
-            	gcr.cmd = NAND_QLC_READ_CL;
-          	else if (page_type == 2)
-            	gcr.cmd = NAND_QLC_READ_CU;
-          	else
-            	gcr.cmd = NAND_QLC_READ_U;
+			gcr.cmd = NAND_QLC_READ;
 		}
 		gcr.stime = 0;
         ssd_advance_status(ssd, ppa, &gcr);
@@ -1409,6 +1481,8 @@ static void read_req_migrate(struct ssd *ssd, uint64_t lpn) {
 	} else 
 		ppa = fdp_get_new_page(ssd, 0, 0, 0, false, mode);
 
+	ssd->slc_write_cnt ++;
+
 	/* update maptbl */
 	set_maptbl_ent(ssd, lpn, &ppa);
 	/* update rmap */
@@ -1427,15 +1501,7 @@ static void read_req_migrate(struct ssd *ssd, uint64_t lpn) {
 	if (mode == 0)
 		swr.cmd = NAND_SLC_PROG;
 	else {
-		int page_type = ppa.g.pg % 4;
-		if (page_type == 0)
-			swr.cmd = NAND_QLC_PROG_L;
-		else if (page_type == 1)
-			swr.cmd = NAND_QLC_PROG_CL;
-		else if (page_type == 2)
-			swr.cmd = NAND_QLC_PROG_CU;
-		else
-			swr.cmd = NAND_QLC_PROG_U;
+		swr.cmd = NAND_QLC_PROG;
 	}
 
 	swr.stime = 0;
@@ -1481,15 +1547,7 @@ static uint64_t fdp_gc_write_page(struct ssd *ssd, struct ppa *old_ppa, uint16_t
         if (mode == 0)
 			gcw.cmd = NAND_SLC_PROG;
 		else {
-			int page_type = new_ppa.g.pg % 4;
-			if (page_type == 0)
-            	gcw.cmd = NAND_QLC_PROG_L;
-          	else if (page_type == 1)
-            	gcw.cmd = NAND_QLC_PROG_CL;
-          	else if (page_type == 2)
-            	gcw.cmd = NAND_QLC_PROG_CU;
-          	else
-            	gcw.cmd = NAND_QLC_PROG_U;
+            gcw.cmd = NAND_QLC_PROG;
 		}
         gcw.stime = 0;
         ssd_advance_status(ssd, &new_ppa, &gcw);
@@ -1535,7 +1593,7 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
     if (ssd->sp.enable_gc_delay) {
         struct nand_cmd gcw;
         gcw.type = GC_IO;
-        gcw.cmd = NAND_QLC_PROG_U;
+        gcw.cmd = NAND_QLC_PROG;
         gcw.stime = 0;
         ssd_advance_status(ssd, &new_ppa, &gcw);
     }
@@ -1590,6 +1648,19 @@ static struct ru *select_victim_ru_slc(struct ssd *ssd, bool force, int rgid)
         return NULL;
     }
 	
+	if (ssd->ra_full_flag == 1 && (ssd->sp.write_mode == 1 || ssd->sp.write_mode == 2)) {
+		double cur_ru_hotness = 0;
+		double min_hotness = 1000000000;
+		for (int j = 0; j < rum->victim_ru_cnt; j++) {
+			struct ru * tmp_ru = rum->victim_ru_pq->d[j + 1]; 
+			cur_ru_hotness = tmp_ru->read_hotness * (ssd->avg_qlc_read_lat - SLC_R) + tmp_ru->write_hotness * (QLC_W - SLC_W);
+			if (tmp_ru->ruhid == 1 && cur_ru_hotness < min_hotness) {
+				victim_ru = tmp_ru;
+				min_hotness = cur_ru_hotness;
+			}
+		}
+		ftl_log("read area victim_ru: %d cur_ru_hotness:%lf\n", victim_ru->id, min_hotness);
+	}
 
     /* victim_ru is a danggling node now */
 	// ftl_log("slc victim_ru: %d\n", victim_ru->id);
@@ -1619,20 +1690,26 @@ static struct ru *select_victim_ru_qlc(struct ssd *ssd, bool force, int rgid)
     return victim_ru;
 }
 
-static int fdp_clean_one_block(struct ssd *ssd, struct ppa *ppa, uint16_t rgid, uint16_t ruhid, int migrate_flag)
+static int fdp_clean_one_block(struct ssd *ssd, struct ppa *ppa, uint16_t rgid, uint16_t ruhid)
 {
     struct ssdparams *spp = &ssd->sp;
     struct nand_page *pg_iter = NULL;
     int cnt = 0;
 	int mode = get_ruh_mode(ssd, ruhid);
+
+	// 根据GC效率判断是否将当前GC数据迁移到QLC区域
+	int migrate_flag = 0;
+	if (ssd->sp.write_mode == 0) 
+		migrate_flag = 1;
+	else if (ssd->sp.write_mode == 1 || ssd->sp.write_mode == 2){
+		if (ssd->slc_gc_eff >= 0.8 && ruhid == 0)
+			migrate_flag = 0;
+		else
+			migrate_flag = 1;
+	}
+
     for (int pg = 0; pg < spp->pgs_per_blk; ) {
-		if (mode == 0)
-			ssd->gc_total_cnt ++;
         ppa->g.pg = pg;
-#ifdef FDP_DEBUG
-	printf("old_ch: %d old_lun: %d old_pl: %d old_blk: %d old_pg: %d\n",
-			ppa->g.ch, ppa->g.lun, ppa->g.pl, ppa->g.blk, ppa->g.pg);
-#endif
         pg_iter = get_pg(ssd, ppa);
         /* there shouldn't be any free page in victim blocks */
         ftl_assert(pg_iter->status != PG_FREE);
@@ -1640,12 +1717,6 @@ static int fdp_clean_one_block(struct ssd *ssd, struct ppa *ppa, uint16_t rgid, 
             /* delay the maptbl update until "write" happens */
 			// 当gc效率较低时，将gc需要迁移的数据放置在qlc中
 			gc_read_page(ssd, ppa);
-			uint64_t cur_lpn = get_rmap_ent(ssd, ppa);
-			if(mode == 0) {
-				ssd->gc_valid_cnt ++;
-				ssd->qlc_migrate_cnt ++;
-				ssd->qlc_migrate_hotness += ssd->write_hotness[cur_lpn];
-			}
             cnt++;
         }
 
@@ -1656,32 +1727,60 @@ static int fdp_clean_one_block(struct ssd *ssd, struct ppa *ppa, uint16_t rgid, 
 			pg ++;
     }
 
-	ssd->gc_ratio = (ssd->gc_total_cnt - ssd->gc_valid_cnt * 1.0) / ssd->gc_total_cnt;
-	migrate_flag = ssd->gc_ratio < ssd->sp.util_ratio_low ? 1 : 0;
-	ssd->avg_qlc_gc_hotness = ssd->qlc_migrate_hotness / ssd->qlc_migrate_cnt;
-
 	for (int pg = 0; pg < spp->pgs_per_blk; ) {
         ppa->g.pg = pg;
         pg_iter = get_pg(ssd, ppa);
         /* there shouldn't be any free page in victim blocks */
         ftl_assert(pg_iter->status != PG_FREE);
         if (pg_iter->status == PG_VALID) {
-			if(migrate_flag == 1) {
-				uint64_t cur_lpn = get_rmap_ent(ssd, ppa);
-				if (ssd->write_hotness[cur_lpn] <= ssd->avg_qlc_gc_hotness) {
+			uint64_t cur_lpn = get_rmap_ent(ssd, ppa);
+			if ( migrate_flag == 1 && mode == 0) {
+				// if (ssd->sp.write_mode == 1 || ssd->sp.write_mode == 2) {
+				// 	ssd->gc_valid_cnt ++;
+				// }
+				// if (ssd->sp.write_mode == 1)
+				// 	ssd->gc_hotness += ssd->write_hotness[cur_lpn];
+				// else if (ssd->sp.write_mode == 2){
+				// 	ssd->gc_hotness += ssd->read_hotness[cur_lpn] * (ssd->avg_qlc_read_lat - NAND_SLC_READ_LAT) + ssd->write_hotness[cur_lpn] * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
+				// }
+
+				if (ssd->sp.write_mode == 1 || ssd->sp.write_mode == 2) {
+					double cur_read_hotness = 0;
+					double cur_write_hotness = 0;
+					double cur_slc_avg_hotness = 0;
+					if (ssd->sp.write_mode == 1) {
+						// cur_hotness = ssd->write_hotness[cur_lpn];
+						// cur_slc_avg_hotness = ssd->total_slc_write_hotness / ssd->slc_valid_cnt;
+					} else if (ssd->sp.write_mode == 2) {
+						if (ruhid == 0)
+							cur_slc_avg_hotness = ssd->total_slc_wa_read_hotness / ssd->slc_valid_cnt * (ssd->avg_qlc_read_lat - SLC_R) + ssd->total_slc_wa_write_hotness / ssd->slc_valid_cnt * (QLC_W - SLC_W);
+						else if (ruhid == 1)
+							cur_slc_avg_hotness = ssd->total_slc_ra_read_hotness / ssd->slc_valid_cnt * (ssd->avg_qlc_read_lat - SLC_R) + ssd->total_slc_ra_write_hotness / ssd->slc_valid_cnt * (QLC_W - SLC_W);
+						cur_write_hotness = ssd->write_hotness[cur_lpn] * (QLC_W - SLC_W);
+						cur_read_hotness = ssd->read_hotness[cur_lpn] * (ssd->avg_qlc_read_lat - SLC_R);
+					}
+					if (cur_read_hotness + cur_write_hotness <= cur_slc_avg_hotness) {
+						ssd->write_migrate_count ++;
+						fdp_gc_write_page(ssd, ppa, rgid, 2);
+						ssd->qlc_migrate_cnt ++;
+					} else 
+						fdp_gc_write_page(ssd, ppa, rgid, ruhid);
+				} else if (ssd->sp.write_mode == 0) {
 					ssd->write_migrate_count ++;
 					fdp_gc_write_page(ssd, ppa, rgid, 2);
-				} else
-					fdp_gc_write_page(ssd, ppa, rgid, 0);
+					ssd->qlc_migrate_cnt ++;
+				}
 			} else
 				fdp_gc_write_page(ssd, ppa, rgid, ruhid);
         }
 
+		// SLC块只需要扫描四分之一的块
 		if (mode == 0)
 			pg += 4;
 		else
 			pg ++;
     }
+
 	(ssd->sp).pages_from_gc += cnt;
 
     ftl_assert(get_blk(ssd, ppa)->vpc == cnt);
@@ -1765,7 +1864,7 @@ static void output_info_log(struct ssd *ssd) {
 	double wa = ((ssd->sp).pages_from_wl + (ssd->sp).pages_from_gc + (ssd->sp).pages_from_host + (ssd->sp).pages_from_migrate) * 1.0 / ((ssd->sp).pages_from_host);
 	double ra = ((ssd->sp).pages_from_host_read + (ssd->sp).read_retry + (ssd->sp).pages_from_gc) * 1.0 / ((ssd->sp).pages_from_host_read);
 	FILE *fp_wara = fopen(path2wara, "a+");
-	fprintf(fp_wara, "wa:%lf ra:%lf migrate_count:%"PRIu64" write_migrate_count:%"PRIu64" slc_wc:%"PRIu64" slc_rc:%"PRIu64" qlc_wc:%"PRIu64" qlc_rc:%"PRIu64" low_rc:%"PRIu64" high_rc:%"PRIu64"\n", wa, ra, ssd->migrate_count, ssd->write_migrate_count, ssd->rums_slc[0].write_cnt, ssd->rums_slc[0].read_cnt, ssd->rums_qlc[0].write_cnt, ssd->rums_qlc[0].read_cnt, ssd->rums_qlc[0].low_read_cnt, ssd->rums_qlc[0].high_read_cnt);
+	fprintf(fp_wara, "wa:%lf ra:%lf migrate_count:%"PRIu64" write_migrate_count:%"PRIu64" slc_wc:%"PRIu64" slc_rc:%"PRIu64" qlc_wc:%"PRIu64" qlc_rc:%"PRIu64"\n", wa, ra, ssd->migrate_count, ssd->write_migrate_count, ssd->rums_slc[0].write_cnt, ssd->rums_slc[0].read_cnt, ssd->rums_qlc[0].write_cnt, ssd->rums_qlc[0].read_cnt);
 	fclose(fp_wara);
 	return;
 }
@@ -1816,105 +1915,8 @@ static int do_gc(struct ssd *ssd, bool force)
     return 0;
 }
 
-// 在victim_ru和full_ru里找最冷的ru作为下次迁移对象
-// static void update_hotless_ru(struct ssd *ssd) {
-// 	struct ru *ru;
-// 	struct fdp_ru_mgmt *rum_slc = &ssd->rums_slc[0];
-// 	uint64_t avg_qlc_read_lat = (NAND_QLC_READ_CL_LAT + NAND_QLC_READ_L_LAT + NAND_QLC_READ_CU_LAT * ssd->age + NAND_QLC_READ_U_LAT * ssd->age) / 4;
-// 	// 遍历 victim_ru 
-// 	ru = pqueue_peek(rum_slc->victim_ru_pq);
-// 	if (ru) {
-// 		ssd->hotless_ru_id = ru->id;
-// 		ssd->hotless_ru_hotness = ru->read_hotness * 4 / ru->vpc * (avg_qlc_read_lat - NAND_SLC_READ_LAT) + ru->write_hotness * 4 / ru->vpc * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
-// 		//ftl_log("vpc: %d read: %lf write: %lf total_hotness: %lf ru id: %d ruhid: %d\n", ru->vpc, ru->read_hotness, ru->write_hotness, ssd->hotless_ru_hotness, ru->id, ru->ruhid);
-// 		for (int j = 1; j < rum_slc->victim_ru_cnt; j++) {
-// 			ru = rum_slc->victim_ru_pq->d[j + 1]; 
-// 			double cur_hotness = ru->read_hotness * 4 / ru->vpc * (avg_qlc_read_lat - NAND_SLC_READ_LAT) + ru->write_hotness * 4 / ru->vpc * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
-// 			if (cur_hotness < ssd->hotless_ru_hotness) {
-// 				ssd->hotless_ru_hotness = cur_hotness;
-// 				ssd->hotless_ru_id = ru->id;
-// 			}
-// 			//ftl_log("vpc: %d read: %lf write: %lf total_hotness: %lf ru id: %d ruhid: %d\n", ru->vpc, ru->read_hotness, ru->write_hotness, cur_hotness, ru->id, ru->ruhid);
-// 		}
-// 	} else {
-// 		ru = QTAILQ_FIRST(&rum_slc->full_ru_list);
-// 		if (ru) {
-// 			ssd->hotless_ru_id = ru->id;
-// 			ssd->hotless_ru_hotness = ru->read_hotness * 4 / ru->vpc * (avg_qlc_read_lat - NAND_SLC_READ_LAT) + ru->write_hotness * 4/ ru->vpc * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
-// 		}
-// 	}
-
-// 	// 遍历full_ru
-// 	ru = QTAILQ_FIRST(&rum_slc->full_ru_list);
-// 	if (ru) {
-// 		double cur_hotness = ru->read_hotness * 4 / ru->vpc * (avg_qlc_read_lat - NAND_SLC_READ_LAT) + ru->write_hotness * 4 / ru->vpc * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
-// 		if (cur_hotness < ssd->hotless_ru_hotness) {
-// 			ssd->hotless_ru_hotness = cur_hotness;
-// 			ssd->hotless_ru_id = ru->id;
-// 		}
-// 		//ftl_log("vpc: %d read: %lf write: %lf total_hotness: %lf ru id: %d ruhid: %d\n", ru->vpc, ru->read_hotness, ru->write_hotness, cur_hotness, ru->id, ru->ruhid);
-// 		for (int j = 1; j < rum_slc->full_ru_cnt; j++) {
-// 			ru = QTAILQ_NEXT(ru, entry);
-// 			cur_hotness = ru->read_hotness * 4 / ru->vpc * (avg_qlc_read_lat - NAND_SLC_READ_LAT) + ru->write_hotness * 4 / ru->vpc * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
-// 			if (cur_hotness < ssd->hotless_ru_hotness) {
-// 				ssd->hotless_ru_hotness = cur_hotness;
-// 				ssd->hotless_ru_id = ru->id;
-// 			}
-// 			//ftl_log("vpc: %d read: %lf write: %lf total_hotness: %lf ru id: %d ruhid: %d\n", ru->vpc, ru->read_hotness, ru->write_hotness, cur_hotness, ru->id, ru->ruhid);
-// 		}
-// 	}
-// 	//ftl_log("hotless ru id: %d, hotness: %lf\n", ssd->hotless_ru_id, ssd->hotless_ru_hotness);
-// 	return;
-// }
-
-// static void update_wr_hotless_ru(struct ssd *ssd) {
-// 	struct ru *ru;
-// 	struct fdp_ru_mgmt *rum_slc = &ssd->rums_slc[0];
-
-// 	// 遍历 victim_ru 
-// 	ru = pqueue_peek(rum_slc->victim_ru_pq);
-// 	if (ru) {
-// 		ssd->wr_hotless_ru_id = ru->id;
-// 		ssd->wr_hotless_ru_hotness = ru->write_hotness * 4 / ru->vpc;
-// 		for (int j = 1; j < rum_slc->victim_ru_cnt; j++) {
-// 			ru = rum_slc->victim_ru_pq->d[j + 1];
-// 			double cur_hotness = ru->write_hotness * 4 / ru->vpc;
-// 			if (cur_hotness < ssd->wr_hotless_ru_hotness) {
-// 				ssd->wr_hotless_ru_hotness = cur_hotness;
-// 				ssd->wr_hotless_ru_id = ru->id;
-// 			}
-// 		}
-// 	} else {
-// 		ru = QTAILQ_FIRST(&rum_slc->full_ru_list);
-// 		if (ru) {
-// 			ssd->wr_hotless_ru_id = ru->id;
-// 			ssd->wr_hotless_ru_hotness = ru->write_hotness * 4 / ru->vpc;
-// 		}
-// 	}
-
-// 	// 遍历full_ru
-// 	ru = QTAILQ_FIRST(&rum_slc->full_ru_list);
-// 	if (ru) {
-// 		double cur_hotness = ru->write_hotness * 4 / ru->vpc;
-// 		if (cur_hotness < ssd->wr_hotless_ru_hotness) {
-// 			ssd->wr_hotless_ru_hotness = cur_hotness;
-// 			ssd->wr_hotless_ru_id = ru->id;
-// 		}
-// 		for (int j = 1; j < rum_slc->full_ru_cnt; j++) {
-// 			ru = QTAILQ_NEXT(ru, entry);
-// 			cur_hotness = ru->write_hotness * 4 / ru->vpc;
-// 			if (cur_hotness < ssd->wr_hotless_ru_hotness) {
-// 				ssd->wr_hotless_ru_hotness = cur_hotness;
-// 				ssd->wr_hotless_ru_id = ru->id;
-// 			}
-// 		}
-// 	}
-// 	//ftl_log("wr hotless ru id: %d, wr_hotness: %lf\n", ssd->wr_hotless_ru_id, ssd->wr_hotless_ru_hotness);
-// 	return;
-// }
-
 // migrate_flag 0表示正常GC 1表示迁移
-static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16_t rgid, int migrate_flag) { 
+static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16_t rgid) { 
 	struct ru *victim_ru = NULL;
 	struct ssdparams *spp = &ssd->sp;
 	struct nand_lun *lunp; 
@@ -1965,16 +1967,45 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 
 	ruhid = victim_ru->ruhid; 
 	//ruh = &req->ns->endgrp->fdp.ruhs[ruhid];	
+	double ru_read_hotness = 0;
+	double ru_write_hotness = 0;
+	if (victim_ru->mode == 0) {
+		ru_write_hotness = victim_ru->write_hotness * (QLC_W - SLC_W) * 4.0 / victim_ru->vpc;
+		ru_read_hotness = victim_ru->read_hotness * (ssd->avg_qlc_read_lat - SLC_R) * 4.0 / victim_ru->vpc;
+	}
+	ftl_log("GC-ing ru:%d,ipc=%d,vpc=%d,r_hotness:%lf,w_hotness:%lf victim=%d,full=%d,free=%d,bad=%d,read=%d,write=%d,ruhid=%d\n", victim_ru->id,
+              victim_ru->ipc, victim_ru->vpc, ru_read_hotness, ru_write_hotness, rum->victim_ru_cnt, rum->full_ru_cnt, rum->free_ru_cnt, rum->bad_ru_cnt, rum->read_ru_cnt, rum->write_ru_cnt, ruhid);
+	
+	// 最近三次的平均GC效率
+	if (victim_ru->mode == 0){
+		ssd->slc_gc_eff = ssd->slc_gc_eff * 2.0 / 3 + victim_ru->ipc * 1.0 / ssd->sp.pgs_per_ru / 3;
+	} else {
+		ssd->qlc_gc_eff = ssd->qlc_gc_eff * 2.0 / 3 + victim_ru->ipc * 1.0 / ssd->sp.pgs_per_ru / 3;
+	}
+	// double slc_valid = ssd->slc_gc_eff * ssd->sp.pgs_per_ru / 4;
+	// ssd->gc_func_left = NAND_SLC_PROG_LAT + slc_valid / (ssd->sp.pgs_per_ru / 4 - slc_valid) * (NAND_SLC_PROG_LAT + NAND_SLC_READ_LAT);
+	// if (ssd->has_do_slc_gc)
+	// 	ssd->gc_func_left +=  NAND_SLC_ERASE_LAT * RG_DEGREE * 1.0 / (ssd->sp.pgs_per_ru / 4 - slc_valid);
+	// double qlc_valid = ssd->qlc_gc_eff * ssd->sp.pgs_per_ru;
+	// ssd->gc_func_right = NAND_QLC_PROG_L_LAT + qlc_valid / (ssd->sp.pgs_per_ru - qlc_valid) * (NAND_QLC_PROG_L_LAT + ssd->avg_qlc_read_lat);
+	// if (ssd->has_do_qlc_gc)
+	// 	ssd->gc_func_right += NAND_QLC_ERASE_LAT * RG_DEGREE * 1.0 / (ssd->sp.pgs_per_ru - qlc_valid); 
+	// ftl_log("slc_valid:%lf qlc_valid:%lf gc_func_left:%lf gc_func_right:%lf\n", slc_valid, qlc_valid, ssd->gc_func_left, ssd->gc_func_right);
 
-	ftl_log("GC-ing ru:%d,ipc=%d,vpc=%d,victim=%d,full=%d,free=%d,bad=%d,ruhid=%d\n", victim_ru->id,
-              victim_ru->ipc, victim_ru->vpc, rum->victim_ru_cnt, rum->full_ru_cnt, rum->free_ru_cnt, rum->bad_ru_cnt, ruhid); 
+	// if (ssd->sp.write_mode == 1 || ssd->sp.write_mode == 2) {
+	// 	// ssd->qlc_migrate_cnt = 0;
+	// 	ssd->avg_qlc_gc_hotness = ssd->gc_valid_cnt == 0 ? 0 : ssd->gc_hotness / ssd->gc_valid_cnt;
+    // 	ftl_log("avg_qlc:%lf gc_valid_cnt:%d gc_hotness:%lf\n", ssd->avg_qlc_gc_hotness, ssd->gc_valid_cnt, ssd->gc_hotness);
+	// 	ssd->gc_valid_cnt = 0;
+	// 	ssd->gc_hotness = 0;
+	// }
 
 	for (int lunidx = start_lunidx; lunidx < start_lunidx + RG_DEGREE; lunidx++) {
 		ppa.g.ch = lunidx / spp->luns_per_ch;
 		ppa.g.lun = lunidx % spp->luns_per_ch;
 		ppa.g.pl = 0;
 		lunp = get_lun(ssd, &ppa);
-		gc_pgs += fdp_clean_one_block(ssd, &ppa, rgid, ruhid, migrate_flag);
+		gc_pgs += fdp_clean_one_block(ssd, &ppa, rgid, ruhid);
 		mark_block_free(ssd, &ppa);
 
 		if (spp->enable_gc_delay)
@@ -1992,21 +2023,6 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 		lunp->gc_endtime = lunp->next_lun_avail_time;
 	}
 
-	ssd->qlc_migrate_hotness = 0;
-	ssd->qlc_migrate_cnt = 0;
-	ssd->gc_total_cnt = 0;
-	ssd->gc_valid_cnt = 0;
-
-	// 更新新的hotless_ru
-	// update_hotless_ru(ssd);
-	// update_wr_hotless_ru(ssd);
-
-	// ssd->gc_ratio = ssd->gc_total_cnt == 0 ? 1 : (ssd->gc_total_cnt - ssd->gc_valid_cnt) * 1.0 / ssd->gc_total_cnt;
-	// ssd->gc_valid_cnt = 0;
-	// ssd->gc_total_cnt = 0;
-	ftl_log("avg_qlc_gc_hotness:%lf gc_ratio:%lf\n", ssd->avg_qlc_gc_hotness, ssd->gc_ratio);
-
-
 	// 修改ru的相关信息
 	if (mode == 0) {
 		victim_ru->pe_slc += spp->gap;
@@ -2020,38 +2036,20 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 	}
 
 	victim_ru->erase = victim_ru->pe_slc * spp->slc_alpha + victim_ru->pe_qlc;
+	if (victim_ru->mode == 0) {
+		if (victim_ru->ruhid == 0) {
+			ssd->total_slc_wa_read_hotness -= victim_ru->read_hotness;
+			ssd->total_slc_wa_write_hotness -= victim_ru->write_hotness;
+		} else if (victim_ru->ruhid == 1) {
+			ssd->total_slc_ra_read_hotness -= victim_ru->read_hotness;
+			ssd->total_slc_ra_write_hotness -= victim_ru->write_hotness;
+		}
+		ssd->slc_valid_cnt -= victim_ru->vpc / 4;
+	}
 	victim_ru->write_hotness = 0;
 	victim_ru->read_hotness = 0;
-
-	// 修改准入SLC的阈值
-	if (ssd->sp.write_mode == 5) {
-		double rw_slc = ssd->pe_slc * 3.0 / 160;
-		double rw_qlc = ssd->pe_qlc * 1.0 / 9;
-		double erase_ratio = rw_slc / rw_qlc;
-		if (erase_ratio < 0.9) {
-			//ssd->page_size_thre ++;
-			ssd->hot_ratio = ssd->hot_ratio < 0.99 ? ssd->hot_ratio + 0.01 : 1;
-		}	
-		else if (erase_ratio > 1.1) {
-			//ssd->page_size_thre = ssd->page_size_thre > 4? ssd->page_size_thre - 1 : 0;
-			ssd->hot_ratio = ssd->hot_ratio > 0.01 ? ssd->hot_ratio - 0.01 : 0;
-		}
-		//ftl_log("erase_ratio: %lf, hot_ratio: %lf\n", erase_ratio, ssd->hot_ratio);
-	}
-	// if (ruh->ruht == NVME_RUHT_INITIALLY_ISOLATED && log_event(ruh, FDP_EVT_MEDIA_REALLOC)) {
-	// 	struct nvme_fdp_event_realloc mr;
-	// 	e = nvme_fdp_alloc_event(req->ns->ctrl, &req->ns->endgrp->fdp.ctrl_events);
-	// 	e->type = FDP_EVT_MEDIA_REALLOC;
-	// 	e->flags = FDPEF_PIV | FDPEF_NSIDV | FDPEF_LV;
-	// 	e->pid = cpu_to_le16(ruhid);
-	// 	e->nsid = cpu_to_le32(req->ns->id);
-	// 	mr.flags = 1 << 0; // LIV on
-	// 	mr.nlbam = gc_pgs * 8;
-	// 	mr.lba = 0;
-	// 	memcpy(e->type_specific, &mr, sizeof(mr));
-	// 	e->rgid = cpu_to_le16(rgid);
-	// 	e->ruhid = cpu_to_le16(ruhid);
-	// }
+	victim_ru->victim_pre = 0;
+	
 	ftl_log("ru:%d erase_cnt:%lf\n", victim_ru->id, victim_ru->erase);
 
 	// 统计当前有效页数
@@ -2062,9 +2060,9 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 			tmp = &ssd->rus[get_slc_ru_id(ssd, i)];
 		else
 			tmp = &ssd->rus[get_qlc_ru_id(ssd, i)];
-		util += tmp->vpc;
+		util += 
+		tmp->vpc;
 	}
-	// ftl_log("valid page:%lf\n", util);
 
 	/* reset wp of victim ru */
 	victim_ru->wp.ch = start_lunidx / spp->luns_per_ch;
@@ -2142,15 +2140,7 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 								if (mode == 0)
 									gcr.cmd = NAND_SLC_READ;
 								else {
-									int page_type = ppa.g.pg % 4;
-									if (page_type == 0)
-										gcr.cmd = NAND_QLC_READ_L;
-									else if (page_type == 1)
-										gcr.cmd = NAND_QLC_READ_CL;
-									else if (page_type == 2)
-										gcr.cmd = NAND_QLC_READ_CU;
-									else
-										gcr.cmd = NAND_QLC_READ_U;
+									gcr.cmd = NAND_QLC_READ;
 								}
 								gcr.stime = 0;
 								while (counter > 0) {
@@ -2172,15 +2162,7 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 								if (mode == 0)
 									gcw.cmd = NAND_SLC_PROG;
 								else {
-									int page_type = ppa.g.pg % 4;
-									if (page_type == 0)
-										gcw.cmd = NAND_QLC_PROG_L;
-									else if (page_type == 1)
-										gcw.cmd = NAND_QLC_PROG_CL;
-									else if (page_type == 2)
-										gcw.cmd = NAND_QLC_PROG_CU;
-									else
-										gcw.cmd = NAND_QLC_PROG_U;
+									gcw.cmd = NAND_QLC_PROG;
 								}
 								gcw.stime = 0;
 								while (counter > 0) {
@@ -2268,15 +2250,7 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 							if (spp->enable_gc_delay) {
 								struct nand_cmd gcr;
 								gcr.type = WL_IO;
-								int page_type = ppa.g.pg % 4;
-								if (page_type == 0)
-									gcr.cmd = NAND_QLC_READ_L;
-								else if (page_type == 1)
-									gcr.cmd = NAND_QLC_READ_CL;
-								else if (page_type == 2)
-									gcr.cmd = NAND_QLC_READ_CU;
-								else
-									gcr.cmd = NAND_QLC_READ_U;
+								gcr.cmd = NAND_QLC_READ;
 								gcr.stime = 0;
 								while (counter > 0) {
 									ssd_advance_status(ssd, &ppa, &gcr);
@@ -2291,15 +2265,7 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 							if (ssd->sp.enable_gc_delay) {
 								struct nand_cmd gcw;
 								gcw.type = WL_IO;
-								int page_type = ppa.g.pg % 4;
-								if (page_type == 0)
-									gcw.cmd = NAND_QLC_PROG_L;
-								else if (page_type == 1)
-									gcw.cmd = NAND_QLC_PROG_CL;
-								else if (page_type == 2)
-									gcw.cmd = NAND_QLC_PROG_CU;
-								else
-									gcw.cmd = NAND_QLC_PROG_U;
+								gcw.cmd = NAND_QLC_PROG;
 								gcw.stime = 0;
 								while (counter > 0) {
 									ssd_advance_status(ssd, &ppa, &gcw);
@@ -2338,6 +2304,13 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 				}
 			}
 		}
+		
+		if (victim_ru->mode == 0 && victim_ru->ruhid == 0)
+			rum->write_ru_cnt --;
+		else if (victim_ru->mode == 0 && victim_ru->ruhid == 1)
+			rum->read_ru_cnt --;
+		if (ruhid == 1 && rum->read_ru_cnt < ssd->sp.ra_max_cnt && ssd->ra_full_flag == 1)
+			ssd->ra_full_flag = 3;
     	QTAILQ_INSERT_TAIL(&rum->free_ru_list, victim_ru, entry);
 		rum->free_ru_cnt++;
     }
@@ -2349,24 +2322,14 @@ static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, int gc_flag)
 	struct ru *victim_ru_slc, *victim_ru_qlc = NULL;
 	if (gc_flag >= 2) {
     	victim_ru_qlc = select_victim_ru_qlc(ssd, force, rgid);
-		if(victim_ru_qlc)
-			erase_victim_ru(ssd, victim_ru_qlc->id, 1, rgid, 0);
+		if(victim_ru_qlc) {;
+			erase_victim_ru(ssd, victim_ru_qlc->id, 1, rgid);
+		}
 	}
 	if (gc_flag == 3 || gc_flag == 1) {
-		// slc若是已满或者有效页太多，触发迁移操作
 		victim_ru_slc = select_victim_ru_slc(ssd, force, rgid);
 		if(victim_ru_slc) {
-			// double slc_util = ssd->rums_slc[0].valid_page_num * 4.0 / (ssd->rums_slc[0].tt_rus * ssd->sp.pgs_per_ru);
-			// double qlc_util = ssd->rums_qlc[0].valid_page_num * 1.0 / (ssd->rums_qlc[0].tt_rus * ssd->sp.pgs_per_ru);
-			// ftl_log("slc_util: %lf\n", slc_util);
-			int migrate_flag = 0;
-			// if (ssd->gc_ratio < ssd->sp.util_ratio_low) {
-			// 	migrate_flag = 1;
-			// }
-			// if (slc_util >= ssd->sp.util_ratio_high) {
-			// 	migrate_flag = 2;
-			// }
-			erase_victim_ru(ssd, victim_ru_slc->id, 0, rgid, migrate_flag);
+			erase_victim_ru(ssd, victim_ru_slc->id, 0, rgid);
 		}
 	}
     if (!victim_ru_qlc && !victim_ru_slc) {
@@ -2377,71 +2340,54 @@ static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, int gc_flag)
 }
 
 // 只修改映射，不模拟时延
-static void ssd_pre_read(struct ssd *ssd, uint64_t lpn) {
-	// if (ssd->sp.write_mode != 2) {
-		/* new write */
-		int ruhid = 2;
+static void ssd_pre_read(struct ssd *ssd, uint64_t lpn, int page_num) {
+	int ruhid = 2;
 
-		if (ssd->sp.write_mode == 1) {
-			// double cur_hotness = ssd->write_hotness[lpn] * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
+	// double cur_slc_avg_hotness = 0;
+	// if (ssd->sp.write_mode == 0) {
+	// 	if (ssd->v_write <= ssd->v_gc) {
+	// 		ruhid = 0;
+	// 	} else {
+	// 		if (page_num < 16) {
+	// 			ruhid = 0;
+	// 		}
+	// 	}
+	// }
+	
+	// if (ssd->sp.write_mode == 1) {
+	// 	// if (ssd->v_write <= ssd->v_gc)
+	// 	// 	ruhid = 0;
+	// 	// else {
+	// 		cur_slc_avg_hotness =  ssd->slc_valid_cnt == 0 ? 0 : ssd->total_slc_write_hotness / ssd->slc_valid_cnt;
+	// 		if (ssd->write_hotness[lpn] >= cur_slc_avg_hotness)
+	// 			ruhid = 0;
+	// 	// }
+	// }
 
-			// double slc_util = ssd->rums_slc[0].valid_page_num * 4.0 / (ssd->rums_slc[0].tt_rus * ssd->sp.pgs_per_ru);
-			// double comp_hotness = 0;
-			// double ratio = 2.0;
-			// if (slc_util < 0.3) {
-			// 	comp_hotness = 0;
-			// } else if (slc_util < ssd->sp.util_ratio_low) {
-			// 	comp_hotness = ratio * ssd->wr_hotless_ru_hotness * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
-			// // } else if (slc_util < ssd->sp.util_ratio_high - 0.02) {
-			// // 	comp_hotness = ssd->wr_hotless_ru_hotness * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
-			// } else {
-			// 	comp_hotness = ratio * ssd->wr_hotless_ru_hotness * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT) + NAND_SLC_READ_LAT + NAND_QLC_PROG_CL_LAT;
-			// }
-			// if ((ssd->write_hotness[lpn] >= 1) && (cur_hotness > comp_hotness))
-			// 	ruhid = 0;
-			if (ssd->gc_ratio >= ssd->sp.util_ratio_low)
-				ruhid = 0;
-			else {
-				if (ssd->write_hotness[lpn] > ssd->avg_qlc_gc_hotness + 1)
-					ruhid = 0;
-			}
-		}
+	// if (ssd->sp.write_mode == 2) {
+	// 	cur_slc_avg_hotness =  ssd->slc_valid_cnt == 0 ? 0 : ssd->total_slc_read_hotness  / ssd->slc_valid_cnt * (ssd->avg_qlc_read_lat - NAND_SLC_READ_LAT) + ssd->total_slc_write_hotness / ssd->slc_valid_cnt * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
+	// 	double cur_hotness = ssd->read_hotness[lpn] * (ssd->avg_qlc_read_lat - NAND_SLC_READ_LAT) + ssd->write_hotness[lpn] * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
+	// 	// if (ssd->v_write <= ssd->v_gc) {
+	// 	// 	ruhid = 0;
+	// 	// } else {
+	// 		if (cur_hotness >= 2.0 * cur_slc_avg_hotness)
+	// 			ruhid = 0;
+	// 	// }
+	// }
 
-		if (ssd->sp.write_mode == 2 || ssd->sp.write_mode == 5) {
-			// 热度大于SLC最小RU平均热度 + 迁移开销的转发到SLC
-			uint64_t avg_qlc_read_lat = (NAND_QLC_READ_CL_LAT + NAND_QLC_READ_L_LAT + NAND_QLC_READ_CU_LAT * ssd->age + NAND_QLC_READ_U_LAT * ssd->age) / 4; 
-			double cur_hotness = ssd->read_hotness[lpn] * (avg_qlc_read_lat - NAND_SLC_READ_LAT) + ssd->write_hotness[lpn] * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
+	int mode = get_ruh_mode(ssd, ruhid);
+	struct ppa ppa = fdp_get_new_page(ssd, 0, 0, ruhid, false, mode);
 
-			double slc_util = ssd->rums_slc[0].valid_page_num * 4.0 / (ssd->rums_slc[0].tt_rus * ssd->sp.pgs_per_ru);
-			//ftl_log("slc_util:%lf\n", slc_util);
-			double ratio = 2.0;
-			double comp_hotness = 0;
-			if (slc_util < 0.3) {
-				comp_hotness = 0;
-			} else if (slc_util < ssd->sp.util_ratio_low) {
-				comp_hotness = ratio * ssd->hotless_ru_hotness;
-			// } else if (slc_util < ssd->sp.util_ratio_high - 0.02) {
-			// 	comp_hotness = ssd->hotless_ru_hotness;
-			} else {
-				comp_hotness = ratio * ssd->hotless_ru_hotness +  NAND_SLC_READ_LAT + NAND_QLC_PROG_CL_LAT;
-			}
-			if ((ssd->write_hotness[lpn] >= 1 || ssd->read_hotness[lpn] >= 2) && (cur_hotness > comp_hotness))
-				ruhid = 0;
-		}
+	/* update maptbl */
+	set_maptbl_ent(ssd, lpn, &ppa);
+	/* update rmap */
+	set_rmap_ent(ssd, lpn, &ppa);
 
-		int mode = get_ruh_mode(ssd, ruhid);
-		struct ppa ppa = fdp_get_new_page(ssd, 0, 0, ruhid, false, mode);
+	mark_page_valid(ssd, &ppa);
 
-		/* update maptbl */
-		set_maptbl_ent(ssd, lpn, &ppa);
-		/* update rmap */
-		set_rmap_ent(ssd, lpn, &ppa);
-
-		mark_page_valid(ssd, &ppa);
-
-		/* need to advance the write pointer here */
-		ssd_advance_fdp_write_pointer(ssd, 0, 0, ruhid, false, mode);
-		return;
+	/* need to advance the write pointer here */
+	ssd_advance_fdp_write_pointer(ssd, 0, 0, ruhid, false, mode);
+	return;
 	// } else {
 	// 	int gc_flag = 0;
 	// 	int r;
@@ -2508,7 +2454,7 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 				if (r == -1)
 					break;
 			}
-            ssd_pre_read(ssd, lpn);
+            ssd_pre_read(ssd, lpn, end_lpn - start_lpn + 1);
         }
 		// 重新获取
 		ppa = get_maptbl_ent(ssd, lpn);
@@ -2517,9 +2463,17 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         srd.type = USER_IO;
 
 		struct ru *cur_ru = get_ru(ssd, &ppa);
-		cur_ru->read_hotness -= ssd->read_hotness[lpn];
+		double pre_read_hotness = ssd->read_hotness[lpn];
 		ssd->read_hotness[lpn] = add_hotness(ssd->read_hotness[lpn]);
-		cur_ru->read_hotness += ssd->read_hotness[lpn];
+		cur_ru->read_hotness = cur_ru->read_hotness + ssd->read_hotness[lpn] - pre_read_hotness;
+		if (cur_ru->mode == 0) {
+			if (cur_ru->ruhid == 0)
+				ssd->total_slc_wa_read_hotness = ssd->total_slc_wa_read_hotness + ssd->read_hotness[lpn] - pre_read_hotness;
+			else if (cur_ru->ruhid == 1)
+				ssd->total_slc_ra_read_hotness = ssd->total_slc_ra_read_hotness + ssd->read_hotness[lpn] - pre_read_hotness;
+		}
+		cur_ru->victim_pre = get_ru_victim_pre(ssd, cur_ru);
+
 		int mode = cur_ru->mode;
 		
 		if (mode == 0) {
@@ -2527,23 +2481,8 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 			ssd->rums_slc[0].read_cnt ++;
 		}
 		else {
-			int page_type = ppa.g.pg % 4;
-			if (page_type == 0) {
-            	srd.cmd = NAND_QLC_READ_L;
-				ssd->rums_qlc[0].low_read_cnt ++;
-			}
-          	else if (page_type == 1) {
-            	srd.cmd = NAND_QLC_READ_CL;
-				ssd->rums_qlc[0].low_read_cnt ++;
-			}
-          	else if (page_type == 2){
-            	srd.cmd = NAND_QLC_READ_CU;
-				ssd->rums_qlc[0].high_read_cnt ++;
-			}
-          	else {
-            	srd.cmd = NAND_QLC_READ_U;
-				ssd->rums_qlc[0].high_read_cnt ++;
-			}
+			srd.cmd = NAND_QLC_READ;
+			ssd->rums_qlc[0].high_read_cnt ++;
 			ssd->rums_qlc[0].read_cnt ++;
 		}
 
@@ -2613,35 +2552,13 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
 		int write_flag = 1;
         ppa = get_maptbl_ent(ssd, lpn);
-		
-		// 全部写入SLC
-		if (spp->write_mode == 0) {
-			write_flag = 0;
-		} 
-		
-		if (spp->write_mode == 3) {
-			// update的数据直接放入slc
-			// if (mapped_ppa(&ppa)) {
-			// 	write_flag = 0;
-			// } else {
-			int page_num = end_lpn - start_lpn + 1;
-			int dynamic = 0;
-			int thre = dynamic ? ssd->page_size_thre : 4;
-			if (page_num > thre) {
-				write_flag = 1;
-			} else
-				write_flag = 0;
-			// }		
-		}
-		
-		if (spp->write_mode == 4) {
-			write_flag = 1;
-		}
-
+	
 		int ppa_map_flag = 0;
         if (mapped_ppa(&ppa)) {
-			if (get_ru(ssd, &ppa)->mode == 0)
+			if (get_ru(ssd, &ppa)->mode == 0 && get_ru(ssd, &ppa)->ruhid == 0)
 				ppa_map_flag = 1;
+			else if (get_ru(ssd, &ppa)->mode == 1  && get_ru(ssd, &ppa)->ruhid == 1)
+				ppa_map_flag = 2;
             /* update old page information first */
 			uint16_t old_rgid = (ppa.g.ch * spp->luns_per_ch + ppa.g.lun) / RG_DEGREE;
 			mark_page_invalid(ssd, &ppa, old_rgid); 
@@ -2653,82 +2570,70 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 		ssd->lpnwtbl[lpn]++;
 		ssd->write_hotness[lpn] = add_hotness(ssd->write_hotness[lpn]);
 
-		if (spp->write_mode == 1) {
-			// double cur_hotness = ssd->write_hotness[lpn] * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
-
-			// double slc_util = ssd->rums_slc[0].valid_page_num * 4.0 / (ssd->rums_slc[0].tt_rus * ssd->sp.pgs_per_ru);
-			// double comp_hotness = 0;
-			// double ratio = 2.0;
-			// if (slc_util < 0.3) {
-			// 	comp_hotness = 0;
-			// } else if (slc_util < ssd->sp.util_ratio_low) {
-			// 	if (ppa_map_flag)
-			// 		comp_hotness = 0;
-			// 	else
-			// 		comp_hotness = ratio * ssd->wr_hotless_ru_hotness * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
-			// // } else if (slc_util < ssd->sp.util_ratio_high - 0.02) {
-			// // 	comp_hotness = ssd->wr_hotless_ru_hotness * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
-			// } else {
-			// 	if (ppa_map_flag)
-			// 		comp_hotness =  ratio * ssd->wr_hotless_ru_hotness * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
-			// 	else
-			// 		comp_hotness = ratio * ssd->wr_hotless_ru_hotness * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT) + NAND_SLC_READ_LAT + NAND_QLC_PROG_CL_LAT;
-			// }
-			// if ((ssd->write_hotness[lpn] >= 1) && (cur_hotness > comp_hotness))
-			// 	write_flag = 0;
-			if (ssd->gc_ratio >= ssd->sp.util_ratio_low)
+		// VIS工作
+		if (spp->write_mode == 0) {
+			if (ssd->v_write <= ssd->v_gc) {
 				write_flag = 0;
-			else {
-				if (ppa_map_flag || ssd->write_hotness[lpn] > ssd->avg_qlc_gc_hotness + 1)
-					write_flag = 0;
-			}
-		}
-
-		if (spp->write_mode == 2 || spp->write_mode == 5) {
-			// 热度大于SLC最小RU平均热度 + 迁移开销的转发到SLC
-			uint64_t avg_qlc_read_lat = (NAND_QLC_READ_CL_LAT + NAND_QLC_READ_L_LAT + NAND_QLC_READ_CU_LAT * ssd->age + NAND_QLC_READ_U_LAT * ssd->age) / 4; 
-			double cur_hotness = ssd->read_hotness[lpn] * (avg_qlc_read_lat - NAND_SLC_READ_LAT) + ssd->write_hotness[lpn] * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
-
-			double slc_util = ssd->rums_slc[0].valid_page_num * 4.0 / (ssd->rums_slc[0].tt_rus * ssd->sp.pgs_per_ru);
-			//ftl_log("slc_util:%lf\n", slc_util);
-			double ratio = 2.0;
-			double comp_hotness = 0;
-			if (slc_util < 0.3) {
-				comp_hotness = 0;
-			} else if (slc_util < ssd->sp.util_ratio_low) {
-				if (ppa_map_flag)
-					comp_hotness = 0;
-				else
-					comp_hotness = ratio * ssd->hotless_ru_hotness;
-			// } else if (slc_util < ssd->sp.util_ratio_high - 0.02) {
-			// 	comp_hotness = ssd->hotless_ru_hotness;
 			} else {
-				if (ppa_map_flag)
-					comp_hotness = ratio * ssd->hotless_ru_hotness;
-				else
-					comp_hotness = ratio * ssd->hotless_ru_hotness +  NAND_SLC_READ_LAT + NAND_QLC_PROG_CL_LAT;
+				int page_num = end_lpn - start_lpn + 1;
+				if (page_num < 16 || ppa_map_flag == 1) {
+					write_flag = 0;
+				} else
+					write_flag = 1;
 			}
-			if ((ssd->write_hotness[lpn] >= 1 || ssd->read_hotness[lpn] >= 2) && (cur_hotness > comp_hotness))
-				write_flag = 0;
 		}
 
-		// 根据类型指定ruhid
-		if (ruhid == 0 ||  ruhid == 1 ||  ruhid == 2) {
-			if (write_flag) {
-				ruhid = 2;
+		double cur_slc_wa_avg_hotness = 0;
+		//double cur_slc_ra_avg_hotness = 0;
+		double cur_write_hotness = 0;
+		double cur_read_hotness = 0;
+
+		if (spp->write_mode == 1) {
+			// if (ssd->gc_func_left * 3.5 <= ssd->gc_func_right)
+			// 	write_flag = 0;
+			// else {
+			// 	cur_slc_avg_hotness = ssd->slc_valid_cnt == 0 ? 0 :ssd->total_slc_write_hotness / ssd->slc_valid_cnt;
+			// 	if (ppa_map_flag || ssd->write_hotness[lpn] >= cur_slc_avg_hotness + 1)
+			// 		write_flag = 0;
+			// }		
+		}
+
+		if (spp->write_mode == 2) {
+			cur_slc_wa_avg_hotness = ssd->slc_valid_cnt == 0 ? 0 : ssd->total_slc_wa_read_hotness / ssd->slc_valid_cnt * (ssd->avg_qlc_read_lat - SLC_R) + ssd->total_slc_wa_write_hotness / ssd->slc_valid_cnt * (QLC_W - SLC_W);
+			//cur_slc_ra_avg_hotness = ssd->slc_valid_cnt == 0 ? 0 : ssd->total_slc_ra_read_hotness / ssd->slc_valid_cnt * (ssd->avg_qlc_read_lat - SLC_R) + ssd->total_slc_ra_write_hotness / ssd->slc_valid_cnt * (QLC_W - SLC_W);
+			cur_write_hotness = ssd->write_hotness[lpn] * (QLC_W - SLC_W);
+			cur_read_hotness = ssd->read_hotness[lpn] * (ssd->avg_qlc_read_lat - SLC_R);
+
+			if (ppa_map_flag == 1) {
+				write_flag = 0;
+				ruhid = 0;
+			} else if (ppa_map_flag == 2){
+				write_flag = 0;
+				ruhid = 1;
+			// } else if (cur_read_hotness + cur_write_hotness >= cur_slc_ra_avg_hotness + SLC_R + SLC_W && cur_read_hotness > cur_write_hotness) {
+			// 	write_flag = 0;
+			// 	ruhid = 1;
+			} else if (ssd->slc_gc_eff >= 0.8) {
+				write_flag = 0;
+				ruhid = 0;
+			} else if (cur_write_hotness + cur_read_hotness >= cur_slc_wa_avg_hotness + QLC_W - SLC_W) {
+				write_flag = 0;
+				ruhid = 0;
+				// }
 			}
-			else {
-				if (ssd->read_hotness[lpn] > ssd->write_hotness[lpn])
-					ruhid = 1;
-				else
-					ruhid = 0;
-			}
+		}
+
+		if (write_flag) {
+			ruhid = 2;
 		}
 
 		if (ruhid == 2)
 			ssd->rums_qlc[0].write_cnt ++;
-		else
+		else {
 			ssd->rums_slc[0].write_cnt ++;
+			if (spp->write_mode == 0)
+				ssd->slc_write_cnt ++;
+		}
 
 		//ftl_log("len:%d, ruhid:%d\n", len, ruhid);
 
@@ -2761,15 +2666,7 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 		if (mode == 0)
 			swr.cmd = NAND_SLC_PROG;
 		else {
-			int page_type = ppa.g.pg % 4;
-			if (page_type == 0)
-            	swr.cmd = NAND_QLC_PROG_L;
-          	else if (page_type == 1)
-            	swr.cmd = NAND_QLC_PROG_CL;
-          	else if (page_type == 2)
-            	swr.cmd = NAND_QLC_PROG_CU;
-          	else
-            	swr.cmd = NAND_QLC_PROG_U;
+            swr.cmd = NAND_QLC_PROG;
 		}
 
         swr.stime = req->stime;
@@ -2831,62 +2728,37 @@ static void *ftl_thread(void *arg)
     ssd->to_ftl = n->to_ftl;
     ssd->to_poller = n->to_poller;
 	
-	//uint64_t start_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+	uint64_t start_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 	uint64_t start_time2 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+	//uint64_t start_time3 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 	uint64_t cur_time;
 
 	// 每一秒更新热度
-	//uint64_t time_gap = 100000000;
+	uint64_t time_gap = 50000000;
 	uint64_t time_gap2 = 1000000000;
+	//uint64_t time_gap3 = 100000000;
     while (1) {
 		cur_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-		// if (cur_time - start_time >= time_gap) {
-		// 	// 所有页面热度减半
-		// 	//double rate = 0.9;
-		// 	ssd->avg_qlc_gc_hotness = ssd->qlc_migrate_cnt == 0 ? 0 : ssd->qlc_migrate_hotness / ssd->qlc_migrate_cnt;
+		if (ssd->sp.write_mode == 0 && cur_time - start_time >= time_gap) {
+			ssd->v_write = ssd->slc_write_cnt * 1.0;
+			ssd->v_gc = ssd->qlc_migrate_cnt * 1.0;
+			//ftl_log("v_write:%lf v_gc:%lf\n", ssd->v_write, ssd->v_gc);
+			ssd->slc_write_cnt = 0;
+			ssd->qlc_migrate_cnt = 0;
+			start_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+		}
+
+		// if ((ssd->sp.write_mode == 1 || ssd->sp.write_mode == 2) && cur_time - start_time3 >= time_gap3) {
+		// 	ssd->avg_qlc_gc_hotness = ssd->qlc_migrate_cnt == 0 ? ssd->avg_qlc_gc_hotness : ssd->qlc_migrate_hotness / ssd->qlc_migrate_cnt;
+		// 	ssd->gc_ratio = ssd->gc_total_cnt == 0 ? ssd->gc_ratio : (ssd->gc_total_cnt - ssd->gc_valid_cnt) * 1.0 / ssd->gc_total_cnt;
 		// 	ssd->qlc_migrate_hotness = 0;
 		// 	ssd->qlc_migrate_cnt = 0;
-
-		// 	ssd->gc_ratio = ssd->gc_total_cnt == 0 ? 1 : (ssd->gc_total_cnt - ssd->gc_valid_cnt) * 1.0 / ssd->gc_total_cnt;
-		// 	ssd->gc_valid_cnt = 0;
 		// 	ssd->gc_total_cnt = 0;
+		// 	ssd->gc_valid_cnt = 0;
 		// 	ftl_log("avg_qlc_gc_hotness:%lf gc_ratio:%lf\n", ssd->avg_qlc_gc_hotness, ssd->gc_ratio);
-
-		// 	// 在vicim_ru中寻找热度最低的SLC块的平均页热度
-		// 	// struct fdp_ru_mgmt *rum_slc = &ssd->rums_slc[0];
-		// 	// uint64_t avg_qlc_read_lat = (NAND_QLC_READ_CL_LAT + NAND_QLC_READ_L_LAT + NAND_QLC_READ_CU_LAT + NAND_QLC_READ_U_LAT) / 4; 
-		// 	// for (int j = 0; j < rum_slc->tt_rus; j ++) {
-		// 	// 	ru = &ssd->rus[get_slc_ru_id(ssd, j)];
-		// 	// 	double cur_hotness = ru->read_hotness / ssd->sp.pgs_per_ru * (avg_qlc_read_lat * ssd->age - NAND_SLC_READ_LAT) + ru->write_hotness / ssd->sp.pgs_per_ru * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
-		// 	// 	if (j == 0)
-		// 	// 		ssd->hotless_ru_hotness = cur_hotness;
-		// 	// 	if (cur_hotness < ssd->hotless_ru_hotness) {
-		// 	// 		ssd->hotless_ru_hotness = cur_hotness;
-		// 	// 		ssd->hotless_ru_id = ru->id;
-		// 	// 	}
-		// 	// }
-
-		// 	//ftl_log("score:%lf\n", line_score);
-		// 	// ru = pqueue_peek(rum_slc->victim_ru_pq);
-		// 	// if (ru) {
-		// 	// 	ssd->hotless_ru_id = ru->id;
-		// 	// 	ssd->hotless_ru_hotness = ru->read_hotness / ru->vpc * (avg_qlc_read_lat * ssd->age - NAND_SLC_READ_LAT) + ru->write_hotness / ru->vpc * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
-		// 	// 	for (int j = 1; j < rum_slc->victim_ru_cnt; j++) {
-		// 	// 		ru = rum_slc->victim_ru_pq->d[j + 1]; 
-		// 	// 		double cur_hotness = ru->read_hotness / ru->vpc * (avg_qlc_read_lat * ssd->age - NAND_SLC_READ_LAT) + ru->write_hotness / ru->vpc * (NAND_QLC_PROG_CL_LAT - NAND_SLC_PROG_LAT);
-		// 	// 		ftl_log("read_hotness:%lf, write_hotness:%lf\n", ru->read_hotness, ru->write_hotness);
-		// 	// 		if (cur_hotness < ssd->hotless_ru_hotness) {
-		// 	// 			ssd->hotless_ru_hotness = cur_hotness;
-		// 	// 			ssd->hotless_ru_id = ru->id;
-		// 	// 		}
-		// 	// 		ftl_log("hotness: %lf, ru id: %d\n", cur_hotness, ru->id);
-		// 	// 	}
-		// 	// 	ftl_log("hotless ru id: %d, hotness: %lf\n", ssd->hotless_ru_id, ssd->hotless_ru_hotness);
-		// 	// }
-		// 	// update_hotless_ru(ssd);
-		// 	// update_wr_hotless_ru(ssd);
-		// 	start_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+		// 	start_time3 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 		// }
+
 		if (cur_time - start_time2 >= time_gap2) {
 			for (int j = 0; j < ssd->sp.tt_pgs; j++) {
 				ssd->read_hotness[j] = sub_hotness(ssd->read_hotness[j]);
@@ -2897,7 +2769,13 @@ static void *ftl_thread(void *arg)
 				ru = &ssd->rus[j];
 				ru->write_hotness = sub_hotness(ru->write_hotness);
 				ru->read_hotness = sub_hotness(ru->read_hotness);
+				ru->victim_pre = get_ru_victim_pre(ssd, ru);
 			}
+			ssd->total_slc_wa_read_hotness = sub_hotness(ssd->total_slc_wa_read_hotness);
+			ssd->total_slc_wa_write_hotness = sub_hotness(ssd->total_slc_wa_write_hotness);
+			ssd->total_slc_ra_read_hotness = sub_hotness(ssd->total_slc_ra_read_hotness);
+			ssd->total_slc_ra_write_hotness = sub_hotness(ssd->total_slc_ra_write_hotness);
+
 			start_time2 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 		}
 

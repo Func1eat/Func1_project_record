@@ -1320,6 +1320,9 @@ typedef struct BbCtrlParams {
 
     int util_ratio_low;
     int util_ratio_high;
+
+    int balance_ratio;
+	int unbalance_ratio;
 } BbCtrlParams;
 
 typedef struct ZNSCtrlParams {

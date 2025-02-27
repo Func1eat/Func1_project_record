@@ -12,16 +12,9 @@ enum {
     NAND_SLC_READ = 0,
     NAND_SLC_PROG = 1,
     NAND_SLC_ERASE = 2,
-    NAND_QLC_READ_L = 3,
-    NAND_QLC_READ_CL = 4,
-    NAND_QLC_READ_CU = 5,
-    NAND_QLC_READ_U = 6,
-    NAND_QLC_PROG_L = 7,
-    NAND_QLC_PROG_CL = 8,
-    NAND_QLC_PROG_CU = 9,
-    NAND_QLC_PROG_U = 10,
-	NAND_QLC_PROG_TOTAL = 11,
-    NAND_QLC_ERASE = 12,
+    NAND_QLC_READ = 3,
+    NAND_QLC_PROG = 4,
+    NAND_QLC_ERASE = 5,
     NAND_SLC_READ_LAT = 23000,
     NAND_SLC_PROG_LAT = 80000,
     NAND_SLC_ERASE_LAT = 4000000,
@@ -29,16 +22,33 @@ enum {
     NAND_QLC_READ_CL_LAT = 96000,
     NAND_QLC_READ_CU_LAT = 96000,
     NAND_QLC_READ_U_LAT = 96000,
-	// NAND_QLC_READ_L_LAT = 24000,
-  //   NAND_QLC_READ_CL_LAT = 48000,
-  //   NAND_QLC_READ_CU_LAT = 144000,
-  //   NAND_QLC_READ_U_LAT = 144000,
+	NAND_QLC_READ_L_U_LAT = 24000,
+    NAND_QLC_READ_CL_U_LAT = 48000,
+    NAND_QLC_READ_CU_U_LAT = 144000,
+    NAND_QLC_READ_U_U_LAT = 144000,
     NAND_QLC_PROG_L_LAT = 460000,
     NAND_QLC_PROG_CL_LAT = 460000,
     NAND_QLC_PROG_CU_LAT = 460000,
     NAND_QLC_PROG_U_LAT = 460000,
 	NAND_QLC_PROG_TOTAL_LAT = 1000000,
     NAND_QLC_ERASE_LAT = 10000000,
+};
+
+enum {
+    SLC_R = 1,
+    SLC_W = 3,
+    QLC_1_R = 3,
+    QLC_2_R = 4,
+    QLC_3_R = 4,
+    QLC_4_R = 4,
+    QLC_W = 20,
+    MID_READ_RETRY = 3,
+    OLD_READ_RETRY = 7,
+	QLC_U_1_R = 1,
+    QLC_U_2_R = 2,
+    QLC_U_3_R = 6,
+    QLC_U_4_R = 6,
+	MID_READ_U_RETRY = 7,
 };
 
 enum {
@@ -168,6 +178,9 @@ struct ssdparams {
 	double util_ratio_high;
 	double util_ratio_low;
 
+	double balance_ratio;
+	double unbalance_ratio;
+
     bool enable_gc_delay;
 
     /* below are all calculated values */
@@ -255,6 +268,8 @@ struct ssdparams {
     
 	// 读延迟阈值，高于此阈值的数据会被迁移到slc
 	uint64_t read_latency_threshold;
+
+	int ra_max_cnt;
 };
 
 typedef struct line {
@@ -322,6 +337,8 @@ typedef struct ru {
 	// 统计该ru当前的热度
 	double read_hotness;
 	double write_hotness; 
+
+  double victim_pre;
 } ru; 					
 
 struct ruh {				
@@ -342,6 +359,8 @@ struct fdp_ru_mgmt {
 	int victim_ru_cnt;
 	int full_ru_cnt; 
 	int bad_ru_cnt;
+  int read_ru_cnt;
+  int write_ru_cnt;
 	int ii_gc_ruid;			/* recalim unit for initially isolated gc */
 	uint64_t read_cnt;
 	uint64_t low_read_cnt;
@@ -412,13 +431,37 @@ struct ssd {
 	// 热度比例，用于改变写入两个区域的速率
 	double hot_ratio;
 
-	double qlc_migrate_hotness;
-	int qlc_migrate_cnt;
-	double avg_qlc_gc_hotness;
+	double total_slc_wa_write_hotness;
+	double total_slc_wa_read_hotness;
+	int slc_valid_cnt;
+	double total_slc_ra_write_hotness;
+	double total_slc_ra_read_hotness;
 	
-	int gc_total_cnt;
-	int gc_valid_cnt;
-	double gc_ratio;
+	// int gc_total_cnt;
+	// int gc_valid_cnt;
+	// double gc_ratio;
+
+	// qlc区域平均读延迟
+	double avg_qlc_read_lat;
+
+	double v_gc;
+	double v_write;
+	int slc_write_cnt;
+  	int qlc_migrate_cnt;
+
+  	// 当前存储的SLC区域的GC效率
+	double slc_gc_eff;
+	double qlc_gc_eff;
+	// double gc_func_left;
+	// double gc_func_right;
+	// int has_do_slc_gc;
+	// int has_do_qlc_gc;
+
+	// 当前的窗口计数
+	int cnt_window;
+
+	// 当前读热区已满
+	int ra_full_flag;
 };
 
 void ssd_init(FemuCtrl *n);

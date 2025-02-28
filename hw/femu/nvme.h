@@ -1314,6 +1314,8 @@ typedef struct BbCtrlParams {
     int ru_mode;
     int read_migration;
     int write_mode;
+    int ra_max_cnt;
+    int dynamic_ra_flag;
     int wl_mode;
     int slc_op;
     int qlc_op;
@@ -1323,6 +1325,9 @@ typedef struct BbCtrlParams {
 
     int balance_ratio;
 	int unbalance_ratio;
+
+	int write_buffer_capacity;
+	int read_buffer_capacity;
 } BbCtrlParams;
 
 typedef struct ZNSCtrlParams {

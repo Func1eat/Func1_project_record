@@ -787,6 +787,10 @@ static Property femu_props[] = {
     DEFINE_PROP_INT32("util_ratio_high", FemuCtrl, bb_params.util_ratio_high, 70),
     DEFINE_PROP_INT32("balance_ratio", FemuCtrl, bb_params.balance_ratio, 100),
     DEFINE_PROP_INT32("unbalance_ratio", FemuCtrl, bb_params.unbalance_ratio, 0),
+	DEFINE_PROP_INT32("write_buffer_capacity", FemuCtrl, bb_params.write_buffer_capacity, 1024),
+    DEFINE_PROP_INT32("read_buffer_capacity", FemuCtrl, bb_params.read_buffer_capacity, 1024),
+    DEFINE_PROP_INT32("ra_max_cnt", FemuCtrl, bb_params.ra_max_cnt, 5),
+    DEFINE_PROP_INT32("dynamic_ra_flag", FemuCtrl, bb_params.dynamic_ra_flag, 0),
     DEFINE_PROP_END_OF_LIST(),
 };
 

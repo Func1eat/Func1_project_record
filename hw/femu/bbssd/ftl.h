@@ -269,7 +269,14 @@ struct ssdparams {
 	// 读延迟阈值，高于此阈值的数据会被迁移到slc
 	uint64_t read_latency_threshold;
 
+	// read area最大超级块数量
 	int ra_max_cnt;
+
+	int dynamic_ra_flag;
+
+	// 读写buffer大小
+	int write_buffer_capacity;
+	int read_buffer_capacity;
 };
 
 typedef struct line {

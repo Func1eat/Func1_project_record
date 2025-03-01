@@ -2068,6 +2068,10 @@ static void output_info_log(struct ssd *ssd) {
 	// 打印两个区域的平均pe次数
 	FILE *fp_ec = fopen(path2ec, "a+");
     FILE *fp_ec_info = fopen(path2ecinfo, "w+");
+	char path2status[80] = "status.log";
+	FILE *fp_status = fopen(path2status, "a+");
+	fprintf(fp_status, "%"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64"\n", ssd->status_0_total_cnt, ssd->status_1_total_cnt, ssd->status_2_total_cnt, ssd->status_3_total_cnt, ssd->status_4_total_cnt, ssd->status_5_total_cnt);
+	fclose(fp_status);
 	struct fdp_ru_mgmt *rum_slc = ssd->rums_slc, *rum_qlc = ssd->rums_qlc;
 	struct ru *ru;
 	double erase_slc_cnt = 0, erase_qlc_cnt = 0;
@@ -2282,59 +2286,66 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 			}
 			ftl_log("goodness:%lf\n", goodness);
 
-			
 			// 尝试调整
-			double left_goodness = ssd->write_hotness_thre == 0? -1 : ssd->goodness[ssd->write_hotness_thre - 1];
-			double right_goodness = ssd->write_hotness_thre == 3? -1 : ssd->goodness[ssd->write_hotness_thre + 1];
-			if (goodness < left_goodness || goodness < right_goodness) {
-				if (left_goodness > right_goodness) {
+			if (goodness < 14) {
+				double left_goodness = ssd->write_hotness_thre == 0? -10000 : ssd->goodness[ssd->write_hotness_thre - 1];
+				double right_goodness = ssd->write_hotness_thre == 3? -10000 : ssd->goodness[ssd->write_hotness_thre + 1];
+				if (goodness < left_goodness || goodness < right_goodness) {
+					if (left_goodness > right_goodness) {
+						ssd->write_hotness_thre --;
+						ssd->gc_cnt_before_update_thre = 3;
+					} else {
+						ssd->write_hotness_thre ++;
+						ssd->gc_cnt_before_update_thre = 3;
+					}
+				} else if (ssd->status_4_cnt < ssd->status_5_cnt && left_goodness == 0) {
+					// 说明当前写入阈值大了，大量请求进入QLC
 					ssd->write_hotness_thre --;
 					ssd->gc_cnt_before_update_thre = 3;
-				} else {
+				} else if (ssd->status_4_cnt >= ssd->status_5_cnt && right_goodness == 0) {
+					// 说明当前写入阈值小了，大量冷请求进入SLC又被迁移
 					ssd->write_hotness_thre ++;
 					ssd->gc_cnt_before_update_thre = 3;
-				}
-			} else if (ssd->status_4_cnt < ssd->status_5_cnt && left_goodness == 0) {
-				// 说明当前写入阈值大了，大量请求进入QLC
-				ssd->write_hotness_thre --;
-				ssd->gc_cnt_before_update_thre = 3;
-			} else if (ssd->status_4_cnt >= ssd->status_5_cnt && right_goodness == 0) {
-				// 说明当前写入阈值小了，大量冷请求进入SLC又被迁移
-				ssd->write_hotness_thre ++;
-				ssd->gc_cnt_before_update_thre = 3;
-			} else {
-				int flag = 0;
-				while (flag == 0) {
-					switch(ssd->gc_cnt_before_update_thre) {
-						case 3 :
-							if (ssd->status_4_cnt * 4 <= ssd->status_3_cnt * 17)
-								flag = 1;
-							break;
-						case 2:
-							if (ssd->status_4_cnt * 4 <= ssd->status_2_cnt * 17)
-								flag = 1;
-							break;
-						case 1:
-							if (ssd->status_4_cnt * 4 <= ssd->status_1_cnt * 17)
-								flag = 1;
-							break;
-						case 0:
-							if (ssd->status_4_cnt * 4 <= ssd->status_0_cnt * 17) {
+				} else {
+					int flag = 0;
+					while (flag == 0) {
+						switch(ssd->gc_cnt_before_update_thre) {
+							case 3 :
+								if (ssd->status_4_cnt * 4 <= ssd->status_3_cnt * 17)
+									flag = 1;
+								break;
+							case 2:
+								if (ssd->status_4_cnt * 4 <= ssd->status_2_cnt * 17)
+									flag = 1;
+								break;
+							case 1:
+								if (ssd->status_4_cnt * 4 <= ssd->status_1_cnt * 17)
+									flag = 1;
+								break;
+							case 0:
+								if (ssd->status_4_cnt * 4 <= ssd->status_0_cnt * 17) {
+									flag = 1;
+								}
+								break;
+						}
+						if (flag == 0) {
+							ssd->gc_cnt_before_update_thre --;
+							if (ssd->gc_cnt_before_update < 0) {
+								ssd->write_hotness_thre ++;
+								ssd->gc_cnt_before_update_thre = 3;
 								flag = 1;
 							}
-							break;
+						}	
 					}
-					if (flag == 0) {
-						ssd->gc_cnt_before_update_thre --;
-						if (ssd->gc_cnt_before_update < 0) {
-							ssd->write_hotness_thre ++;
-							ssd->gc_cnt_before_update_thre = 3;
-							flag = 1;
-						}
-					}	
 				}
 			}
 			ftl_log("write_hotness_thre:%d gc_cnt_before_update_thre:%d\n", ssd->write_hotness_thre, ssd->gc_cnt_before_update_thre);
+			ssd->status_0_total_cnt += ssd->status_0_cnt;
+			ssd->status_1_total_cnt += ssd->status_1_cnt;
+			ssd->status_2_total_cnt += ssd->status_2_cnt;
+			ssd->status_3_total_cnt += ssd->status_3_cnt;
+			ssd->status_4_total_cnt += ssd->status_4_cnt;
+			ssd->status_5_total_cnt += ssd->status_5_cnt;
 			ssd->status_0_cnt = 0;
 			ssd->status_1_cnt = 0;
 			ssd->status_2_cnt = 0;
@@ -3089,7 +3100,7 @@ static void *ftl_thread(void *arg)
 
 	// 每一秒更新热度
 	uint64_t time_gap = 50000000;
-	uint64_t time_gap2 = 2000000000;
+	uint64_t time_gap2 = 1000000000;
 	//uint64_t time_gap3 = 100000000;
     while (1) {
 		cur_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);

@@ -480,6 +480,14 @@ struct ssd {
 	int status_3_cnt;
 	int status_4_cnt;
 	int status_5_cnt;
+
+	uint64_t status_0_total_cnt;
+	uint64_t status_1_total_cnt;
+	uint64_t status_2_total_cnt;
+	uint64_t status_3_total_cnt;
+	uint64_t status_4_total_cnt;
+	uint64_t status_5_total_cnt;
+	
 	int gc_cnt_before_update_thre;
   	int write_hotness_thre;
   	// 当前的窗口计数

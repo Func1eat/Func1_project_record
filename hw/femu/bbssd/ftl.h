@@ -410,6 +410,7 @@ struct ssd {
 	// 统计每个lpn的当前热度
 	double *read_hotness;
 	double *write_hotness;
+  double *gc_cnt_before_update;
 	
 	// 记录当前热度最低的SLC块及其热度
 	int hotless_ru_id;
@@ -464,11 +465,29 @@ struct ssd {
 	// int has_do_slc_gc;
 	// int has_do_qlc_gc;
 
-	// 当前的窗口计数
-	int cnt_window;
-
 	// 当前读热区已满
 	int ra_full_flag;
+
+	// 统计当前周期的正常GC数量
+	int gc_to_slc_cnt;
+	// 统计当前周期的迁移数量
+	int gc_to_qlc_cnt;
+
+	// 统计不同状态机在当前周期的数量
+	int status_0_cnt;
+	int status_1_cnt;
+	int status_2_cnt;
+	int status_3_cnt;
+	int status_4_cnt;
+	int status_5_cnt;
+	int gc_cnt_before_update_thre;
+  	int write_hotness_thre;
+  	// 当前的窗口计数
+	int cnt_window;
+	// 记录历史goodness
+	double goodness[4];
+	// 记录这些阈值的间隔
+	int gap[4];
 };
 
 void ssd_init(FemuCtrl *n);

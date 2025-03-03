@@ -381,6 +381,7 @@ struct ssd {
     struct ssdparams sp;
     struct ssd_channel *ch;
     struct ppa *maptbl; /* page level mapping table */
+	struct ppa *back_maptbl;
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
     struct write_pointer wp;
     struct line_mgmt lm;
@@ -487,7 +488,7 @@ struct ssd {
 	uint64_t status_3_total_cnt;
 	uint64_t status_4_total_cnt;
 	uint64_t status_5_total_cnt;
-	
+
 	int gc_cnt_before_update_thre;
   	int write_hotness_thre;
   	// 当前的窗口计数
@@ -496,6 +497,20 @@ struct ssd {
 	double goodness[4];
 	// 记录这些阈值的间隔
 	int gap[4];
+	// 记录这个周期的goodness
+	double cur_goodness;
+	double cur_goodness1;
+
+	// 记录当前统计读写频率的窗口
+	int wr_ratio_cnt_window;
+	int write_req_cnt;
+	int read_req_cnt;
+	double cur_wr_ratio;
+
+	// 记录当前是否处于观察期
+	int observe_flag;
+	// 观察前记录的goodness
+	double pre_goodeness;
 };
 
 void ssd_init(FemuCtrl *n);

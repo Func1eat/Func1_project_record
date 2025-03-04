@@ -595,7 +595,9 @@ static int get_next_free_ruid(struct ssd *ssd, struct fdp_ru_mgmt *rum, int ruhi
 	
 	if (rum->read_ru_cnt >= ssd->sp.ra_max_cnt)
 		ssd->ra_full_flag = 1;
-	//ftl_log("ru_id:%d ruhid:%d\n", ru_tmp->id, ruhid);
+	// ftl_log("ru_id:%d ruhid:%d\n", ru_tmp->id, ruhid);
+	// ftl_log("GC-ing ru:%d,ipc=%d,vpc=%d victim=%d,full=%d,free=%d,bad=%d,read=%d,write=%d,ruhid=%d\n", ru_tmp->id,
+    //           ru_tmp->ipc, ru_tmp->vpc, rum->victim_ru_cnt, rum->full_ru_cnt, rum->free_ru_cnt, rum->bad_ru_cnt, rum->read_ru_cnt, rum->write_ru_cnt, ruhid);
 	return ru_tmp->id; 
 }
 
@@ -868,14 +870,8 @@ static struct ppa fdp_get_new_page(struct ssd *ssd, uint16_t rgid,
 	if (for_gc) {
 		if (ruh->ruht == NVME_RUHT_INITIALLY_ISOLATED)
 			ruid = rum->ii_gc_ruid;
-		else if (ruh->ruht == NVME_RUHT_PERSISTENTLY_ISOLATED)
+		else
 			ruid = ruh->pi_gc_ruids[rgid];
-		else {
-			if (ssd->gc_cnt[lpn] == 0)
-				ruid = ruh->pi_gc_ruids[rgid];
-			else 
-				ruid = rum->ii_gc_ruid;
-		}
 	}
 	else
 		ruid = ruh->cur_ruids[rgid];
@@ -1025,6 +1021,10 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
 	spp->read_latency_threshold = 2 * NAND_QLC_READ_CU_LAT;
 	spp->ra_max_cnt = n->bb_params.ra_max_cnt;
 	spp->dynamic_ra_flag = n->bb_params.dynamic_ra_flag;
+	spp->dynamic_tm_flag = n->bb_params.dynamic_tm_flag;
+	spp->dynamic_tw_flag = n->bb_params.dynamic_tw_flag;
+
+	ftl_log("%d %d %d %d %d %d\n",spp->nchs, spp->luns_per_ch, spp->pls_per_lun, spp->blks_per_pl, spp->pgs_per_blk, spp->secs_per_pg);
     check_params(spp);
 }
 
@@ -1145,8 +1145,8 @@ void ssd_init(FemuCtrl *n)
 
 	ssd->read_hotness = g_malloc0(spp->tt_pgs * sizeof(double));
 	ssd->write_hotness = g_malloc0(spp->tt_pgs * sizeof(double));
-	ssd->gc_cnt_before_update = g_malloc0(spp->tt_pgs * sizeof(int));
-	ssd->age = 2;
+	ssd->gc_cnt_before_update = g_malloc0(spp->tt_pgs * sizeof(double));
+	ssd->age = 0;
 	ssd->hotless_ru_hotness = 0;
 	ssd->hotless_ru_id = 0;
 	ssd->wr_hotless_ru_hotness = 0;
@@ -1188,7 +1188,7 @@ void ssd_init(FemuCtrl *n)
 		ftl_log("avg_qlc_read_lat:%lf,avg_qlc_balance_read_lat:%lf,avg_qlc_unbalance_read_lat:%lf\n", ssd->avg_qlc_read_lat, avg_qlc_balance_read_lat, avg_qlc_unbalance_read_lat);
 	}
 
-	double age_rate = 0.8;
+	double age_rate = 0.6;
 	ssd_aged(ssd, age_rate);
     qemu_thread_create(&ssd->ftl_thread, "FEMU-FTL-Thread", ftl_thread, n,
                        QEMU_THREAD_JOINABLE);
@@ -1203,7 +1203,6 @@ static inline bool valid_ppa(struct ssd *ssd, struct ppa *ppa)
     int blk = ppa->g.blk;
     int pg = ppa->g.pg;
     int sec = ppa->g.sec;
-
     if (ch >= 0 && ch < spp->nchs && lun >= 0 && lun < spp->luns_per_ch && pl >=
         0 && pl < spp->pls_per_lun && blk >= 0 && blk < spp->blks_per_pl && pg
         >= 0 && pg < spp->pgs_per_blk && sec >= 0 && sec < spp->secs_per_pg)
@@ -1425,6 +1424,8 @@ static void mark_page_invalid(struct ssd *ssd, struct ppa *ppa, uint16_t rgid)
 	ru->read_hotness -= ssd->read_hotness[lpn];
 	ru->write_hotness -= ssd->write_hotness[lpn];
 
+	if (ru->read_hotness < 0)
+		ftl_log("read_hotness:%lf %lf\n", ru->read_hotness, ssd->read_hotness[lpn]);
 	if (ru->mode == 0) { 
 		if (ru->ruhid == 0) {
 			ssd->total_slc_wa_write_hotness -= ssd->write_hotness[lpn];
@@ -2001,7 +2002,7 @@ static int fdp_clean_one_block(struct ssd *ssd, struct ppa *ppa, uint16_t rgid, 
 							fdp_gc_write_page(ssd, ppa, rgid, ruhid);
 							ssd->gc_to_slc_cnt ++;
 						}
-					} else if (ssd->sp.write_mode == 0) {
+					} else if (ssd->sp.write_mode == 0 || ssd->sp.write_mode == 3) {
 						ssd->write_migrate_count ++;
 						fdp_gc_write_page(ssd, ppa, rgid, 2);
 						ssd->status_4_cnt ++;
@@ -2167,7 +2168,7 @@ static void output_info_log(struct ssd *ssd) {
     FILE *fp_ec_info = fopen(path2ecinfo, "w+");
 	char path2status[80] = "status.log";
 	FILE *fp_status = fopen(path2status, "a+");
-	fprintf(fp_status, "%"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64"\n", ssd->status_0_total_cnt, ssd->status_1_total_cnt, ssd->status_2_total_cnt, ssd->status_3_total_cnt, ssd->status_4_total_cnt, ssd->status_5_total_cnt);
+	fprintf(fp_status, "%"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64" %lf\n", ssd->status_0_total_cnt, ssd->status_1_total_cnt, ssd->status_2_total_cnt, ssd->status_3_total_cnt, ssd->status_4_total_cnt, ssd->status_5_total_cnt, ssd->goodness_total / (ssd->status_0_total_cnt + ssd->status_1_total_cnt + ssd->status_2_total_cnt + ssd->status_3_total_cnt + ssd->status_4_total_cnt + ssd->status_5_total_cnt));
 	fclose(fp_status);
 	struct fdp_ru_mgmt *rum_slc = ssd->rums_slc, *rum_qlc = ssd->rums_qlc;
 	struct ru *ru;
@@ -2307,8 +2308,8 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 	double ru_read_hotness = 0;
 	double ru_write_hotness = 0;
 	if (victim_ru->mode == 0) {
-		ru_write_hotness = victim_ru->write_hotness * (QLC_W - SLC_W) * 4.0 / victim_ru->vpc;
-		ru_read_hotness = victim_ru->read_hotness * (ssd->avg_qlc_read_lat - SLC_R) * 4.0 / victim_ru->vpc;
+		ru_write_hotness = victim_ru->write_hotness * 4.0 / victim_ru->vpc;
+		ru_read_hotness = victim_ru->read_hotness * 4.0 / victim_ru->vpc;
 	}
 	ftl_log("GC-ing ru:%d,ipc=%d,vpc=%d,r_hotness:%lf,w_hotness:%lf victim=%d,full=%d,free=%d,bad=%d,read=%d,write=%d,ruhid=%d\n", victim_ru->id,
               victim_ru->ipc, victim_ru->vpc, ru_read_hotness, ru_write_hotness, rum->victim_ru_cnt, rum->full_ru_cnt, rum->free_ru_cnt, rum->bad_ru_cnt, rum->read_ru_cnt, rum->write_ru_cnt, ruhid);
@@ -2367,8 +2368,8 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 		double goodness = ssd->status_0_cnt * 17.0 + ssd->status_1_cnt * 13.0 + ssd->status_2_cnt * 9.0 + ssd->status_3_cnt * 5.0 - ssd->status_4_cnt * (4.0 * ssd->gc_cnt_before_update_thre + 4.0);
 		goodness /= ssd->status_0_cnt + ssd->status_1_cnt + ssd->status_2_cnt + ssd->status_3_cnt + ssd->status_4_cnt + ssd->status_5_cnt;
 		if (ssd->status_0_cnt + ssd->status_1_cnt + ssd->status_2_cnt + ssd->status_3_cnt + ssd->status_4_cnt + ssd->status_5_cnt != 0) {
-			ssd->goodness[ssd->write_hotness_thre] = goodness;
 			ssd->gap[ssd->write_hotness_thre] = 0;
+			ssd->goodness[ssd->write_hotness_thre] = goodness;
 			for (int i = 0; i < 4; i ++) {
 				if (i != ssd->write_hotness_thre) {
 					ssd->gap[i] ++;
@@ -2383,6 +2384,8 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 			// 记录到下个周期前的goodness
 			ssd->cur_goodness = goodness;
 
+
+			// 调整读写区域比例的
 			if (ssd->observe_flag >= 1) {
 				ssd->observe_flag ++;
 				if (ssd->observe_flag == 3) {
@@ -2402,59 +2405,67 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 					ssd->cur_goodness1 = goodness;
 			}
 
-			// 尝试调整
-			if (goodness < 14) {
+			// 尝试调整tw
+			int tw_change_flag = 0;
+			if (goodness < 14 && ssd->sp.dynamic_tw_flag) {
+				tw_change_flag = 1;
 				double left_goodness = ssd->write_hotness_thre == 0? -10000 : ssd->goodness[ssd->write_hotness_thre - 1];
 				double right_goodness = ssd->write_hotness_thre == 3? -10000 : ssd->goodness[ssd->write_hotness_thre + 1];
 				if (goodness < left_goodness || goodness < right_goodness) {
 					if (left_goodness > right_goodness) {
-						ssd->write_hotness_thre --;
+						ssd->write_hotness_thre = ssd->write_hotness_thre == 0 ? 0 : ssd->write_hotness_thre - 1;
 						ssd->gc_cnt_before_update_thre = 3;
 					} else {
-						ssd->write_hotness_thre ++;
+						ssd->write_hotness_thre = ssd->write_hotness_thre == 3 ? 3 : ssd->write_hotness_thre + 1;
 						ssd->gc_cnt_before_update_thre = 3;
 					}
 				} else if (ssd->status_4_cnt < ssd->status_5_cnt && left_goodness == 0) {
 					// 说明当前写入阈值大了，大量请求进入QLC
-					ssd->write_hotness_thre --;
+					ssd->write_hotness_thre = ssd->write_hotness_thre == 0 ? 0 : ssd->write_hotness_thre - 1;
 					ssd->gc_cnt_before_update_thre = 3;
 				} else if (ssd->status_4_cnt >= ssd->status_5_cnt && right_goodness == 0) {
 					// 说明当前写入阈值小了，大量冷请求进入SLC又被迁移
-					ssd->write_hotness_thre ++;
+					ssd->write_hotness_thre = ssd->write_hotness_thre == 3 ? 3 : ssd->write_hotness_thre + 1;
 					ssd->gc_cnt_before_update_thre = 3;
 				} else {
-					int flag = 0;
-					while (flag == 0) {
-						switch(ssd->gc_cnt_before_update_thre) {
-							case 3 :
-								if (ssd->status_4_cnt * 4 <= ssd->status_3_cnt * 17)
-									flag = 1;
-								break;
-							case 2:
-								if (ssd->status_4_cnt * 4 <= ssd->status_2_cnt * 17)
-									flag = 1;
-								break;
-							case 1:
-								if (ssd->status_4_cnt * 4 <= ssd->status_1_cnt * 17)
-									flag = 1;
-								break;
-							case 0:
-								if (ssd->status_4_cnt * 4 <= ssd->status_0_cnt * 17) {
-									flag = 1;
-								}
-								break;
-						}
-						if (flag == 0) {
-							ssd->gc_cnt_before_update_thre --;
-							if (ssd->gc_cnt_before_update < 0) {
-								ssd->write_hotness_thre ++;
-								ssd->gc_cnt_before_update_thre = 3;
-								flag = 1;
-							}
-						}	
-					}
+					tw_change_flag = 0;
 				}
 			}
+
+			// tw不调整时可调整tm
+			if (ssd->sp.dynamic_tm_flag && tw_change_flag == 0) {
+				int flag = 0;
+				while (flag == 0) {
+					switch(ssd->gc_cnt_before_update_thre) {
+						case 3 :
+							if (ssd->status_4_cnt * 4 <= ssd->status_3_cnt * 17)
+								flag = 1;
+							break;
+						case 2:
+							if (ssd->status_4_cnt * 4 <= ssd->status_2_cnt * 17)
+								flag = 1;
+							break;
+						case 1:
+							if (ssd->status_4_cnt * 4 <= ssd->status_1_cnt * 17)
+								flag = 1;
+							break;
+						case 0:
+							if (ssd->status_4_cnt * 4 <= ssd->status_0_cnt * 17) {
+								flag = 1;
+							}
+							break;
+					}
+					if (flag == 0) {
+						ssd->gc_cnt_before_update_thre --;
+						if (ssd->gc_cnt_before_update_thre < 0) {
+							ssd->write_hotness_thre = ssd->write_hotness_thre == 3 ? 3 : ssd->write_hotness_thre + 1;
+							ssd->gc_cnt_before_update_thre = 3;
+							flag = 1;
+						}
+					}	
+				}
+			}
+
 			ftl_log("write_hotness_thre:%d gc_cnt_before_update_thre:%d\n", ssd->write_hotness_thre, ssd->gc_cnt_before_update_thre);
 			ssd->status_0_total_cnt += ssd->status_0_cnt;
 			ssd->status_1_total_cnt += ssd->status_1_cnt;
@@ -2462,6 +2473,7 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 			ssd->status_3_total_cnt += ssd->status_3_cnt;
 			ssd->status_4_total_cnt += ssd->status_4_cnt;
 			ssd->status_5_total_cnt += ssd->status_5_cnt;
+			ssd->goodness_total= goodness * (ssd->status_0_cnt + ssd->status_1_cnt + ssd->status_2_cnt + ssd->status_3_cnt + ssd->status_4_cnt + ssd->status_5_cnt);
 			ssd->status_0_cnt = 0;
 			ssd->status_1_cnt = 0;
 			ssd->status_2_cnt = 0;
@@ -2891,11 +2903,11 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
 		ssd->lpnrtbl[lpn] ++;
 
-		int hit_read = lRUCacheGet(read_buffer, lpn);
-		if (hit_read != -1) {
-			sublat = 1000;
-			continue;
-		}
+		// int hit_read = lRUCacheGet(read_buffer, lpn);
+		// if (hit_read != -1) {
+		// 	sublat = 1000;
+		// 	continue;
+		// }
 
 		ssd->wr_ratio_cnt_window ++;
 		ssd->read_req_cnt ++;
@@ -2962,7 +2974,7 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 		}
 		
 		// 未命中则写入读buffer, 读buffer驱逐的页不用写入闪存
-		lRUCachePut(read_buffer, lpn, 0);
+		// lRUCachePut(read_buffer, lpn, 0);
 
 		srd.stime = req->stime;
 		sublat = ssd_advance_status(ssd, &ppa, &srd);
@@ -3051,9 +3063,16 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 			ssd->back_maptbl[lpn].ppa = UNMAPPED_PPA;
 		}
 
-		// 统计热度
+		// 基于动态变化的热度阈值
 		if (spp->write_mode == 1) {
-			if (ppa_map_flag == 1 || ssd->write_hotness[lpn] >= ssd->write_hotness_thre) {
+			double slc_util = ssd->slc_valid_cnt * 4.0 / (ssd->rums_slc[0].tt_rus * ssd->sp.pgs_per_ru);
+			if (ppa_map_flag == 1) {
+				write_flag = 0;
+			} else if (slc_util > 0.8) {
+				// 利用率过高时直接写入到QLC，防止被大量新写入给占满空间
+				ssd->write_hotness_thre = 3;
+				ssd->gc_cnt_before_update_thre = 0;
+			} else if (ssd->write_hotness[lpn] >= ssd->write_hotness_thre) {
 				write_flag = 0;
 			} else {
 				write_flag = 1;
@@ -3077,8 +3096,8 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 			}
 		}
 		
-		if (spp->write_mode == 4) {
-			write_flag = 1;
+		if (spp->write_mode == 3) {
+			write_flag = 0;
 		}
 
 		double cur_slc_wa_avg_hotness = 0;
@@ -3134,6 +3153,9 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
         set_maptbl_ent(ssd, lpn, &ppa);
         /* update rmap */
         set_rmap_ent(ssd, lpn, &ppa);
+		
+		// if (!valid_ppa(ssd, &ppa))
+		// 	printf("Invalid ppa,ch:%d,lun:%d,blk:%d,pl:%d,pg:%d,sec:%d\n", ppa.g.ch, ppa.g.lun, ppa.g.blk, ppa.g.pl, ppa.g.pg, ppa.g.sec);
 
         mark_page_valid(ssd, &ppa);
 
@@ -3204,7 +3226,7 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
 //预先填充QLC区域
 static void ssd_aged(struct ssd *ssd, double age_rate) {
-	uint64_t tt_lpn = 30720 * 256;
+	uint64_t tt_lpn = 30720 * 64;
 	uint64_t start_lpn = 0;
 	uint64_t end_lpn = age_rate * tt_lpn;
 	// ftl_log("start_lpn:%"PRIu64" end_lpn:%"PRIu64"\n", start_lpn, end_lpn);

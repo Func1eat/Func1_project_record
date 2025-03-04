@@ -274,6 +274,10 @@ struct ssdparams {
 
 	int dynamic_ra_flag;
 
+	int dynamic_tm_flag;
+	
+	int dynamic_tw_flag;
+
 	// 读写buffer大小
 	int write_buffer_capacity;
 	int read_buffer_capacity;
@@ -411,7 +415,7 @@ struct ssd {
 	// 统计每个lpn的当前热度
 	double *read_hotness;
 	double *write_hotness;
-  double *gc_cnt_before_update;
+	double *gc_cnt_before_update;
 	
 	// 记录当前热度最低的SLC块及其热度
 	int hotless_ru_id;
@@ -488,6 +492,7 @@ struct ssd {
 	uint64_t status_3_total_cnt;
 	uint64_t status_4_total_cnt;
 	uint64_t status_5_total_cnt;
+	double goodness_total;
 
 	int gc_cnt_before_update_thre;
   	int write_hotness_thre;

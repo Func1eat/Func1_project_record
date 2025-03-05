@@ -463,6 +463,7 @@ struct ssd {
   	int qlc_migrate_cnt;
 
   	// 当前存储的SLC区域的GC效率
+	double slc_util;
 	double slc_gc_eff;
 	double qlc_gc_eff;
 	// double gc_func_left;
@@ -479,20 +480,41 @@ struct ssd {
 	int gc_to_qlc_cnt;
 
 	// 统计不同状态机在当前周期的数量
-	int status_0_cnt;
-	int status_1_cnt;
-	int status_2_cnt;
-	int status_3_cnt;
-	int status_4_cnt;
-	int status_5_cnt;
+	double status_0_cnt;
+	double status_00_cnt;
+	double status_01_cnt;
+	double status_12_cnt;
+	double status_10_cnt;
+	double status_23_cnt;
+	double status_20_cnt;
+	double status_34_cnt;
+	double status_30_cnt;
+	double status_4_cnt;
+	double status_24_cnt;
+	double status_14_cnt;
+	double status_04_cnt;
 
-	uint64_t status_0_total_cnt;
-	uint64_t status_1_total_cnt;
-	uint64_t status_2_total_cnt;
-	uint64_t status_3_total_cnt;
-	uint64_t status_4_total_cnt;
-	uint64_t status_5_total_cnt;
-	double goodness_total;
+	double pre_status_0_cnt;
+	double pre_status_00_cnt;
+	double pre_status_01_cnt;
+	double pre_status_12_cnt;
+	double pre_status_10_cnt;
+	double pre_status_23_cnt;
+	double pre_status_20_cnt;
+	double pre_status_34_cnt;
+	double pre_status_30_cnt;
+	double pre_status_4_cnt;
+	double pre_status_24_cnt;
+	double pre_status_14_cnt;
+	double pre_status_04_cnt;
+
+	// uint64_t status_0_total_cnt;
+	// uint64_t status_1_total_cnt;
+	// uint64_t status_2_total_cnt;
+	// uint64_t status_3_total_cnt;
+	// uint64_t status_4_total_cnt;
+	// uint64_t status_5_total_cnt;
+	// double goodness_total;
 
 	int gc_cnt_before_update_thre;
   	int write_hotness_thre;
@@ -516,6 +538,18 @@ struct ssd {
 	int observe_flag;
 	// 观察前记录的goodness
 	double pre_goodeness;
+
+
+	// comboftl相关参数
+	int combo_write_thre;
+	double *combo_gc_cnt;
+	int combo_gc_cnt_thre;
+	int *combo_warm_bit;
+	uint64_t combo_write_req_cnt;
+	//double status_remain_0_cnt;
+	double status_remain_1_cnt;
+	double status_remain_2_cnt;
+	double status_remain_3_cnt;
 };
 
 void ssd_init(FemuCtrl *n);

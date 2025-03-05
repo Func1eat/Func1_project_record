@@ -835,7 +835,7 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
     FILE *fp_ec_info = fopen(path2ecinfo, "w+");
     char path2status[80] = "status.log";
 	FILE *fp_status = fopen(path2status, "a+");
-	fprintf(fp_status, "%"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64" %lf\n", ssd->status_0_total_cnt, ssd->status_1_total_cnt, ssd->status_2_total_cnt, ssd->status_3_total_cnt, ssd->status_4_total_cnt, ssd->status_5_total_cnt, ssd->goodness_total / (ssd->status_0_total_cnt + ssd->status_1_total_cnt + ssd->status_2_total_cnt + ssd->status_3_total_cnt + ssd->status_4_total_cnt + ssd->status_5_total_cnt));
+	// fprintf(fp_status, "%"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64" %lf\n", ssd->status_0_total_cnt, ssd->status_1_total_cnt, ssd->status_2_total_cnt, ssd->status_3_total_cnt, ssd->status_4_total_cnt, ssd->status_5_total_cnt, ssd->goodness_total / (ssd->status_0_total_cnt + ssd->status_1_total_cnt + ssd->status_2_total_cnt + ssd->status_3_total_cnt + ssd->status_4_total_cnt + ssd->status_5_total_cnt));
 	fclose(fp_status);
 
 	struct fdp_ru_mgmt *rum_slc = ssd->rums_slc, *rum_qlc = ssd->rums_qlc;

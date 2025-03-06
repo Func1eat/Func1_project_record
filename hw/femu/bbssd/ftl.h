@@ -494,19 +494,19 @@ struct ssd {
 	double status_14_cnt;
 	double status_04_cnt;
 
-	double pre_status_0_cnt;
-	double pre_status_00_cnt;
-	double pre_status_01_cnt;
-	double pre_status_12_cnt;
-	double pre_status_10_cnt;
-	double pre_status_23_cnt;
-	double pre_status_20_cnt;
-	double pre_status_34_cnt;
-	double pre_status_30_cnt;
-	double pre_status_4_cnt;
-	double pre_status_24_cnt;
-	double pre_status_14_cnt;
-	double pre_status_04_cnt;
+	// double pre_status_0_cnt;
+	// double pre_status_00_cnt;
+	// double pre_status_01_cnt;
+	// double pre_status_12_cnt;
+	// double pre_status_10_cnt;
+	// double pre_status_23_cnt;
+	// double pre_status_20_cnt;
+	// double pre_status_34_cnt;
+	// double pre_status_30_cnt;
+	// double pre_status_4_cnt;
+	// double pre_status_24_cnt;
+	// double pre_status_14_cnt;
+	// double pre_status_04_cnt;
 
 	// uint64_t status_0_total_cnt;
 	// uint64_t status_1_total_cnt;
@@ -546,10 +546,20 @@ struct ssd {
 	int combo_gc_cnt_thre;
 	int *combo_warm_bit;
 	uint64_t combo_write_req_cnt;
-	//double status_remain_0_cnt;
+	// warm分区的数量
+	double status_remain_0_cnt;
 	double status_remain_1_cnt;
 	double status_remain_2_cnt;
 	double status_remain_3_cnt;
+	double status_update_0_cnt;
+	double status_update_1_cnt;
+	double status_update_2_cnt;
+	double status_update_3_cnt;
+	// warm分区的热度
+	double status_remain_0_hotness;
+	double status_remain_1_hotness;
+	double status_remain_2_hotness;
+	double status_remain_3_hotness;
 };
 
 void ssd_init(FemuCtrl *n);

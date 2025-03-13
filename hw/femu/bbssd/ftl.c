@@ -780,14 +780,8 @@ static void ssd_advance_fdp_write_pointer(struct ssd *ssd, uint16_t rgid, int lp
 		if (ruh->ruht == NVME_RUHT_INITIALLY_ISOLATED) {
 			ruid = rum->ii_gc_ruid; 
 		}
-		else if (ruh->ruht == NVME_RUHT_PERSISTENTLY_ISOLATED) {
-			ruid = ruh->pi_gc_ruids[rgid];
-		}
 		else {
-			if (ssd->gc_cnt[lpn] == 0)
-				ruid = ruh->pi_gc_ruids[rgid];
-			else 
-				ruid = rum->ii_gc_ruid;
+			ruid = ruh->pi_gc_ruids[rgid];
 		}
 	}
 	else
@@ -1165,7 +1159,7 @@ void ssd_init(FemuCtrl *n)
 	// ssd->gc_func_right = 0;
 	// ssd->has_do_qlc_gc = 0;
 	// ssd->has_do_slc_gc = 0;
-	ssd->cnt_window = 0;
+	ssd->cnt_window = 1;
 	ssd->ra_full_flag = 0;
 	ssd->gc_to_slc_cnt = 0;
 	ssd->gc_to_qlc_cnt = 0;
@@ -1215,8 +1209,8 @@ void ssd_init(FemuCtrl *n)
 	// ssd->pre_status_14_cnt = 0;
 	// ssd->pre_status_04_cnt = 0;
 
-	ssd->gc_cnt_before_update_thre = 3;
-	ssd->write_hotness_thre = 0;
+	ssd->gc_cnt_before_update_thre = 1;
+	ssd->write_hotness_thre = 1;
 
 	ssd->combo_write_thre = 128;
 	ssd->combo_gc_cnt_thre = 3;
@@ -1224,6 +1218,13 @@ void ssd_init(FemuCtrl *n)
 	if (ssd->age == 2) {
 		double avg_qlc_unbalance_read_lat = (QLC_U_1_R + QLC_U_2_R + MID_READ_U_RETRY * QLC_U_3_R  + MID_READ_U_RETRY * QLC_U_4_R) * 1.0/ 4;
 		double avg_qlc_balance_read_lat = MID_READ_RETRY * (QLC_1_R + QLC_2_R + QLC_3_R  + QLC_4_R) * 1.0/ 4;
+		ssd->avg_qlc_read_lat = avg_qlc_balance_read_lat * ssd->sp.balance_ratio + avg_qlc_unbalance_read_lat * ssd->sp.unbalance_ratio;
+		ftl_log("avg_qlc_read_lat:%lf,avg_qlc_balance_read_lat:%lf,avg_qlc_unbalance_read_lat:%lf\n", ssd->avg_qlc_read_lat, avg_qlc_balance_read_lat, avg_qlc_unbalance_read_lat);
+	}
+
+	if (ssd->age == 3) {
+		double avg_qlc_unbalance_read_lat = (QLC_U_1_R + QLC_U_2_R + MID_READ_U_RETRY * QLC_U_3_R  + MID_READ_U_RETRY * QLC_U_4_R) * 1.0/ 4;
+		double avg_qlc_balance_read_lat = OLD_READ_RETRY * (QLC_1_R + QLC_2_R + QLC_3_R  + QLC_4_R) * 1.0/ 4;
 		ssd->avg_qlc_read_lat = avg_qlc_balance_read_lat * ssd->sp.balance_ratio + avg_qlc_unbalance_read_lat * ssd->sp.unbalance_ratio;
 		ftl_log("avg_qlc_read_lat:%lf,avg_qlc_balance_read_lat:%lf,avg_qlc_unbalance_read_lat:%lf\n", ssd->avg_qlc_read_lat, avg_qlc_balance_read_lat, avg_qlc_unbalance_read_lat);
 	}
@@ -1303,6 +1304,7 @@ static inline bool if_satisfy_migrate(struct ssd *ssd, struct ppa *ppa) {
 	int migrate_mode = ssd->sp.read_migration;
 	if (migrate_mode == 0)
 		return false;
+	
 	// 根据读取次数判断是否需要迁移
 	uint64_t lpn = get_rmap_ent(ssd, ppa);
 	if (migrate_mode == 1) {
@@ -1310,6 +1312,7 @@ static inline bool if_satisfy_migrate(struct ssd *ssd, struct ppa *ppa) {
 			return true;
 		return false;
 	}
+
 	// 同时根据读取次数和页面类型判断是否需要迁移
 	if (migrate_mode == 2) {
 		int page_type = ppa->g.pg % 4;
@@ -1426,14 +1429,48 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
 			}
 		}
 
+		if(ssd->age == 3 && c == NAND_QLC_READ) {
+			int page_type = ppa->g.pg % 4;
+			int page_balance_type = (ppa->g.pg / 4) % 100 < ssd->sp.balance_ratio * 100 ? 0 : 1;
+			if (page_balance_type == 0) {
+				if (page_type == 0) {
+					operation_lat = NAND_QLC_READ_L_LAT * 5;
+					read_retry = 4;
+				}
+				else if (page_type == 1) {
+					operation_lat = NAND_QLC_READ_CL_LAT * 7;
+					read_retry = 6;
+				}
+				else if (page_type == 2) {
+					operation_lat = NAND_QLC_READ_CU_LAT * 7;
+					read_retry = 6;
+				}
+				else {
+					operation_lat = NAND_QLC_READ_U_LAT * 7;
+					read_retry = 6;
+				}
+			} else {
+				if (page_type == 0)
+					operation_lat = NAND_QLC_READ_L_LAT;
+				else if (page_type == 1)
+					operation_lat = NAND_QLC_READ_CL_LAT;
+				else if (page_type == 2) {
+					operation_lat = NAND_QLC_READ_CU_LAT * 7;
+					read_retry = 6;
+				}
+				else {
+ 					operation_lat = NAND_QLC_READ_U_LAT * 7;
+					read_retry = 6;
+				}
+			}
+		}
+
 		spp->read_retry += read_retry;
         lun->next_lun_avail_time = nand_stime + operation_lat;
 
 		// 读取操作发生在QLC区域且满足条件
 		if (c != NAND_SLC_READ && if_satisfy_migrate(ssd, ppa)){
 			uint64_t lpn = get_rmap_ent(ssd, ppa);
-			//ftl_log("lpn: %"PRIu64" read latency:%"PRIu64"\n", lpn, req_lat);
-			//ftl_log("begin read migrate\n");
 			ssd->migrate_count ++;
 			spp->pages_from_migrate ++;
 			read_req_migrate(ssd, lpn);
@@ -1477,8 +1514,6 @@ static void mark_page_invalid(struct ssd *ssd, struct ppa *ppa, uint16_t rgid)
 		}
 	}
 
-	if (ru->read_hotness < 0)
-		ftl_log("read_hotness:%lf %lf\n", ru->read_hotness, ssd->read_hotness[lpn]);
 	if (ru->mode == 0) { 
 		if (ru->ruhid == 0) {
 			ssd->total_slc_wa_write_hotness -= ssd->write_hotness[lpn];
@@ -1488,6 +1523,7 @@ static void mark_page_invalid(struct ssd *ssd, struct ppa *ppa, uint16_t rgid)
 			ssd->total_slc_ra_write_hotness -= ssd->write_hotness[lpn];
 		}
 		ssd->slc_valid_cnt -= 1;
+		ssd->slc_util = ssd->slc_valid_cnt * 4.0 / ssd->sp.pgs_per_ru / ssd->rums_slc[0].tt_rus;
 	}
 	//ftl_log("lpn:%"PRIu64", ruid:%d read_hotness: %lf, write_hotness: %lf\n", lpn, ru->id, ru->read_hotness, ru->write_hotness);
 
@@ -1624,6 +1660,7 @@ static void mark_page_valid(struct ssd *ssd, struct ppa *ppa)
 				ssd->total_slc_ra_read_hotness += ssd->read_hotness[lpn];
 			}
 			ssd->slc_valid_cnt += 1;
+			ssd->slc_util = ssd->slc_valid_cnt * 4.0 / ssd->sp.pgs_per_ru / ssd->rums_slc[0].tt_rus;
 		}
 	}
     /* update corresponding line status */
@@ -1712,12 +1749,24 @@ static void read_req_migrate(struct ssd *ssd, uint64_t lpn) {
 	ssd->slc_write_cnt ++;
 
 	/* update maptbl */
-	// 不去除原有映射，而是加上备份映射
-	set_back_maptbl_ent(ssd, lpn, &ppa);
-	//set_maptbl_ent(ssd, lpn, &ppa);
-	/* update rmap */
-	set_rmap_ent(ssd, lpn, &ppa);
+	if (spp->read_migration == 3) {
+		// 不去除原有映射，而是加上备份映射
+		set_back_maptbl_ent(ssd, lpn, &ppa);
+		//set_maptbl_ent(ssd, lpn, &ppa);
+		/* update rmap */
+	} else {
+		// 去除原有映射
+		struct ppa old_ppa;
+		old_ppa = get_maptbl_ent(ssd, lpn);
+		if (mapped_ppa(&old_ppa)) {
+			mark_page_invalid(ssd, &old_ppa, 0); 
+			set_rmap_ent(ssd, INVALID_LPN, &old_ppa);
+		}
 
+		// 加上新映射
+		set_maptbl_ent(ssd, lpn, &ppa);
+	}
+	set_rmap_ent(ssd, lpn, &ppa);
 	mark_page_valid(ssd, &ppa);
 
 	if (spp->read_migration == 3) {
@@ -1771,8 +1820,6 @@ static uint64_t fdp_gc_write_page(struct ssd *ssd, struct ppa *old_ppa, uint16_t
 
     /* need to advance the write pointer here */
 	ssd_advance_fdp_write_pointer(ssd, rgid, lpn, ruhid, true, mode);
-
-	ssd->gc_cnt[lpn]++;
 	
     if (ssd->sp.enable_gc_delay) {
         struct nand_cmd gcw;
@@ -1974,7 +2021,8 @@ static struct ru *select_victim_ru_slc(struct ssd *ssd, bool force, int rgid)
     	victim_ru = pqueue_peek(rum->victim_ru_pq);
 
     if (!victim_ru) {
-		return NULL;
+		// 用full list当victim
+		return hotless_ra_ru;
     } 
 
     if (!force && victim_ru->ipc < ssd->sp.pgs_per_ru / 8) {
@@ -2051,6 +2099,22 @@ static int fdp_clean_one_block(struct ssd *ssd, struct ppa *ppa, uint16_t rgid, 
 				if ( mode == 0) {
 					if (ssd->sp.write_mode == 1) {
 						if (ssd->gc_cnt_before_update[cur_lpn] >= ssd->gc_cnt_before_update_thre) {
+							if (ssd->gc_cnt_before_update[cur_lpn] == 3) {
+								ssd->status_remain_3_cnt --;
+								ssd->status_remain_3_hotness -= ssd->write_hotness[cur_lpn];
+							}
+							else if (ssd->gc_cnt_before_update[cur_lpn] == 2) {
+								ssd->status_remain_2_cnt --;
+								ssd->status_remain_2_hotness -= ssd->write_hotness[cur_lpn];
+							}
+							else if (ssd->gc_cnt_before_update[cur_lpn] == 1) {
+								ssd->status_remain_1_cnt --;
+								ssd->status_remain_1_hotness -= ssd->write_hotness[cur_lpn];
+							}
+							else {
+								ssd->status_remain_0_cnt --;
+								ssd->status_remain_0_hotness += ssd->write_hotness[cur_lpn];
+							}
 							ssd->write_migrate_count ++;
 							fdp_gc_write_page(ssd, ppa, rgid, 2);
 							if (ssd->gc_cnt_before_update[cur_lpn] == 3)
@@ -2093,9 +2157,13 @@ static int fdp_clean_one_block(struct ssd *ssd, struct ppa *ppa, uint16_t rgid, 
 							}
 						}
 					} else if (ssd->sp.write_mode == 0 || ssd->sp.write_mode == 3) {
-						ssd->write_migrate_count ++;
-						fdp_gc_write_page(ssd, ppa, rgid, 2);
-						ssd->qlc_migrate_cnt ++;
+						// if (ssd->slc_util >= 0.6) {
+							fdp_gc_write_page(ssd, ppa, rgid, 2);
+							ssd->write_migrate_count ++;
+							ssd->qlc_migrate_cnt ++;
+						// }
+						// else
+						// 	fdp_gc_write_page(ssd, ppa, rgid, ruhid);
 					} else if (ssd->sp.write_mode == 2) {
 						if (ssd->combo_gc_cnt[cur_lpn] == 3)
 							ssd->status_34_cnt ++;
@@ -2147,6 +2215,9 @@ static int fdp_clean_one_block(struct ssd *ssd, struct ppa *ppa, uint16_t rgid, 
 							fdp_gc_write_page(ssd, ppa, rgid, ruhid);
 						}
 					}
+
+					ssd->slc_valid_cnt --;
+					ssd->slc_util = ssd->slc_valid_cnt * 4.0 / ssd->sp.pgs_per_ru / ssd->rums_slc[0].tt_rus;
 				} else
 					fdp_gc_write_page(ssd, ppa, rgid, ruhid);
 				cnt++;
@@ -2164,14 +2235,16 @@ static int fdp_clean_one_block(struct ssd *ssd, struct ppa *ppa, uint16_t rgid, 
 					pg_iter->status = PG_INVALID;
 					set_rmap_ent(ssd, INVALID_LPN, ppa);
 					ssd->back_maptbl[cur_lpn].ppa = UNMAPPED_PPA;
+					ssd->slc_valid_cnt --;
+					ssd->slc_util = ssd->slc_valid_cnt * 4.0 / ssd->sp.pgs_per_ru / ssd->rums_slc[0].tt_rus;
 				// }
 			}
-
         }
 
 		// SLC块只需要扫描四分之一的块
-		if (mode == 0)
+		if (mode == 0) {
 			pg += 4;
+		}
 		else
 			pg ++;
     }
@@ -2256,7 +2329,7 @@ static int fdp_clean_one_block(struct ssd *ssd, struct ppa *ppa, uint16_t rgid, 
 
 	(ssd->sp).pages_from_gc += cnt;
 
-    ftl_assert(get_blk(ssd, ppa)->vpc == cnt);
+    // ftl_assert(get_blk(ssd, ppa)->vpc == cnt);
 	return cnt;
 }
 
@@ -2504,246 +2577,372 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 		lunp->gc_endtime = lunp->next_lun_avail_time;
 	}
 	
-	// 调整准入阈值和迁移阈值
-	ssd->cnt_window ++;
-	if (ssd->cnt_window == 1 && ssd->sp.write_mode == 1 && ssd->sp.dynamic_tm_flag == 1) {
-		// double goodness = ssd->status_0_cnt * 17.0 + ssd->status_1_cnt * 13.0 + ssd->status_2_cnt * 9.0 + ssd->status_3_cnt * 5.0 - ssd->status_4_cnt * (4.0 * ssd->gc_cnt_before_update_thre + 4.0);
-		// goodness /= ssd->status_0_cnt + ssd->status_1_cnt + ssd->status_2_cnt + ssd->status_3_cnt + ssd->status_4_cnt + ssd->status_5_cnt;
-		// double sub_rate = 0.9;
-		// ssd->status_0_cnt = ssd->status_0_cnt * sub_rate + ssd->pre_status_0_cnt * (1- sub_rate);
-		// ssd->status_00_cnt = ssd->status_00_cnt * sub_rate + ssd->pre_status_00_cnt * (1- sub_rate);
-		// ssd->status_01_cnt = ssd->status_01_cnt * sub_rate + ssd->pre_status_01_cnt * (1- sub_rate);
-		// ssd->status_10_cnt = ssd->status_10_cnt * sub_rate + ssd->pre_status_10_cnt * (1- sub_rate);
-		// ssd->status_12_cnt = ssd->status_12_cnt * sub_rate + ssd->pre_status_12_cnt * (1- sub_rate);
-		// ssd->status_20_cnt = ssd->status_20_cnt * sub_rate + ssd->pre_status_20_cnt * (1- sub_rate);
-		// ssd->status_23_cnt = ssd->status_23_cnt * sub_rate + ssd->pre_status_23_cnt * (1- sub_rate);
-		// ssd->status_30_cnt = ssd->status_30_cnt * sub_rate + ssd->pre_status_30_cnt * (1- sub_rate);
-		// ssd->status_34_cnt = ssd->status_34_cnt * sub_rate + ssd->pre_status_34_cnt * (1- sub_rate);
-		// ssd->status_4_cnt = ssd->status_4_cnt * sub_rate + ssd->pre_status_4_cnt * (1- sub_rate);
-		// ssd->status_14_cnt = ssd->status_14_cnt * sub_rate + ssd->pre_status_14_cnt * (1- sub_rate);
-		// ssd->status_24_cnt = ssd->status_24_cnt * sub_rate + ssd->pre_status_24_cnt * (1- sub_rate);
-		// ssd->status_04_cnt = ssd->status_04_cnt * sub_rate + ssd->pre_status_04_cnt * (1- sub_rate);
-		//ftl_log("0:%lf 00:%lf 01:%lf 10:%lf 12:%lf 20:%lf 23:%lf 30:%lf 34:%lf 4:%lf 14:%lf 24:%lf 04:%lf\n", ssd->status_0_cnt, ssd->status_00_cnt,  ssd->status_01_cnt, ssd->status_10_cnt, ssd->status_12_cnt, ssd->status_20_cnt, ssd->status_23_cnt, ssd->status_30_cnt, ssd->status_34_cnt, ssd->status_4_cnt, ssd->status_14_cnt, ssd->status_24_cnt, ssd->status_04_cnt);
-		double ratio_0 = (ssd->status_0_cnt + 1) * 1.0 / (ssd->status_0_cnt + ssd->status_4_cnt + 2);
-		// double ratio_4 = 1 - ratio_0;
-		int gc_thre_flag = 0;
-		double goodness = 0;
-		if (ssd->gc_cnt_before_update_thre == 3) {
-			double ratio_00 = (ssd->status_00_cnt + 1) * 1.0 / (ssd->status_00_cnt + ssd->status_01_cnt + 2);
-			double ratio_01 = 1 - ratio_00;
-			double ratio_12 = (ssd->status_12_cnt + 1) * 1.0 / (ssd->status_12_cnt + ssd->status_10_cnt + 2);
-			double ratio_10 = 1 - ratio_12;
-			double ratio_23 = (ssd->status_23_cnt + 1) * 1.0 / (ssd->status_23_cnt + ssd->status_20_cnt + 2);
-			double ratio_20 = 1 - ratio_23;
-			double ratio_34 = (ssd->status_34_cnt + 1) * 1.0 / (ssd->status_34_cnt + ssd->status_30_cnt + 2);
-			double ratio_30 = 1 - ratio_34;
-			double ratio00 = ratio_0 * ratio_00;
-			double ratio010 = ratio_0 * ratio_01 * ratio_10;
-			double ratio0120 = ratio_0 * ratio_01 * ratio_12 * ratio_20;
-			double ratio01230 = ratio_0 * ratio_01 * ratio_12 * ratio_23 * ratio_30;
-			double ratio01234 = ratio_0 * ratio_01 * ratio_12 * ratio_23 * ratio_34;
-			goodness = 17.0 * ratio00 + 13.0 * ratio010 + 9.0 * ratio0120 + 5.0 * ratio01230 - 16.0 * ratio01234;
 
-			double ratio0124 = ratio01230 + ratio01234;
-			if (ratio0124 * 12 + ratio01230 * 5 - ratio01234 * 16 < ratio0124 * 0)
-				gc_thre_flag = 1;
-		} else if (ssd->gc_cnt_before_update_thre == 2) {
-			double ratio_00 = (ssd->status_00_cnt + 1) * 1.0 / (ssd->status_00_cnt + ssd->status_01_cnt + 2);
-			double ratio_01 = 1 - ratio_00;
-			double ratio_12 = (ssd->status_12_cnt + 1) * 1.0 / (ssd->status_12_cnt + ssd->status_10_cnt + 2);
-			double ratio_10 = 1 - ratio_12;
-			double ratio_24 = (ssd->status_24_cnt + 1) * 1.0 / (ssd->status_24_cnt + ssd->status_20_cnt + 2);
-			double ratio_20 = 1 - ratio_24;
+	if (ssd->sp.write_mode == 1) {
+		double avg_status_0_hotness = ssd->status_remain_0_cnt == 0 ? 0 : ssd->status_remain_0_hotness / ssd->status_remain_0_cnt;
+		double avg_status_1_hotness = ssd->status_remain_1_cnt == 0 ? 0 : ssd->status_remain_1_hotness / ssd->status_remain_1_cnt;
+		double avg_status_2_hotness = ssd->status_remain_2_cnt == 0 ? 0 : ssd->status_remain_2_hotness / ssd->status_remain_2_cnt;
+		double avg_status_3_hotness = ssd->status_remain_3_cnt == 0 ? 0 : ssd->status_remain_3_hotness / ssd->status_remain_3_cnt;
 
-			double ratio00 = ratio_0 * ratio_00;
-			double ratio010 = ratio_0 * ratio_01 * ratio_10;
-			double ratio0120 = ratio_0 * ratio_01 * ratio_12 * ratio_20;
-			double ratio0124 = ratio_0 * ratio_01 * ratio_12 * ratio_24;
-			goodness = 17.0 * ratio00 + 13.0 * ratio010 + 9.0 * ratio0120 - 12.0 * ratio0124;
-			
-			double ratio014 = ratio0120 + ratio0124;
-			if (ratio014 * 8 + ratio0120 * 9 - ratio0124 * 12 < ratio014 * 0)
-				gc_thre_flag = 1;
-		} else if (ssd->gc_cnt_before_update_thre == 1) {
-			double ratio_00 = (ssd->status_00_cnt + 1) * 1.0 / (ssd->status_00_cnt + ssd->status_01_cnt + 2);
-			double ratio_01 = 1 - ratio_00;
-			double ratio_14 = (ssd->status_14_cnt + 1) * 1.0 / (ssd->status_14_cnt + ssd->status_10_cnt + 2);
-			double ratio_10 = 1 - ratio_14;
+		ssd->v_write = ssd->slc_write_cnt * 1.0;
+		ssd->v_gc = ssd->qlc_migrate_cnt * 1.0;
 
-			double ratio00 = ratio_0 * ratio_00;
-			double ratio010 = ratio_0 * ratio_01 * ratio_10;
-			double ratio014 = ratio_0 * ratio_01 * ratio_14;
-			goodness = 17.0 * ratio00 + 13.0 * ratio010 - 8.0 * ratio014;
-			
-			double ratio04 = ratio014 + ratio010;
-			if (ratio04 * 4 + ratio010 * 13 - ratio014 * 8 < ratio04 * 0)
-				gc_thre_flag = 1;
-		} else if (ssd->gc_cnt_before_update_thre == 0) {
-			double ratio_04 = (ssd->status_04_cnt + 1) * 1.0 / (ssd->status_00_cnt + ssd->status_04_cnt + 2);
-			double ratio_00 = 1 - ratio_04;
+		// GC效率高，说明是未充分利用
+		if (ssd->slc_gc_eff > 0.9 && (ssd->write_hotness_thre != 0 || ssd->gc_cnt_before_update_thre != 3) && ssd->sp.dynamic_tw_flag == 1) {
+			ssd->write_hotness_thre = ssd->write_hotness_thre == 0? 0 : ssd->write_hotness_thre - 1;
+			ssd->gc_cnt_before_update_thre = ssd->gc_cnt_before_update_thre == 3? 3 : ssd->gc_cnt_before_update_thre + 1;
+			ssd->cnt_window = 0;
+		} 
 
-			double ratio00 = ratio_0 * ratio_00;
-			double ratio04 = ratio_0 * ratio_04;
-			goodness = 17.0 * ratio00 - 4.0 * ratio04;
-			
-			if (goodness < ratio_0 * 0)
-				gc_thre_flag = 1;
+		// 要么满了，要么未充分利用 需要调整 
+		if (ssd->v_write * 17.0 < ssd->v_gc * 21.0 && ssd->sp.dynamic_tw_flag == 1) {
+			if (ssd->slc_gc_eff < 0.7) {
+				ssd->write_hotness_thre = ssd->write_hotness_thre == 3? 3 : ssd->write_hotness_thre + 1;
+				ssd->cnt_window = 0;
+			}
 		}
 
-		// 出现拥塞，快速提升阈值
-		ftl_log("slc_gc_eff:%lf slc_util:%lf\n", ssd->slc_gc_eff, ssd->slc_util);
-		if (ssd->slc_gc_eff < 0.3) {
-			ssd->gc_cnt_before_update_thre = 0;
-			ssd->write_hotness_thre = 3;
-		} else if (goodness < 5 && ssd->slc_gc_eff < 0.5)  {
-			ssd->gc_cnt_before_update_thre = ssd->gc_cnt_before_update_thre == 0 ? 0 : ssd->gc_cnt_before_update_thre - 1;
-			ssd->write_hotness_thre = ssd->write_hotness_thre == 3 ? 3 : ssd->write_hotness_thre + 1;
-		} else if (goodness < 8 && ssd->slc_gc_eff > 0.7) {
-			// 回落
-			ssd->gc_cnt_before_update_thre = 3;
-			ssd->write_hotness_thre = ssd->write_hotness_thre == 0 ? 0 : ssd->write_hotness_thre - 1;
-		} else if (ssd->sp.dynamic_tm_flag && gc_thre_flag == 1) {
-			ssd->gc_cnt_before_update_thre --;
-			if (ssd->gc_cnt_before_update_thre < 0) {
-				ssd->gc_cnt_before_update_thre = ssd->write_hotness_thre == 3 ? 0: 3;
-				ssd->write_hotness_thre = ssd->write_hotness_thre == 3 ? 3 : ssd->write_hotness_thre + 1;
+		int gc_modify_flag = 0;
+		if (ssd->cnt_window >= 5 && ssd->sp.dynamic_tm_flag == 1) {
+			if (ssd->gc_cnt_before_update_thre == 3) {
+				if (avg_status_3_hotness < 0.2 && ssd->status_remain_3_cnt != 0) {
+					ssd->gc_cnt_before_update_thre = 2;
+					gc_modify_flag = 1;
+				}
+			} else if (ssd->gc_cnt_before_update_thre == 2) {
+				if (avg_status_2_hotness < 0.2 && ssd->status_remain_2_cnt != 0) {
+					ssd->gc_cnt_before_update_thre = 1;
+					gc_modify_flag = 1;
+				} else {
+					double guess_avg_status_3_hotness = avg_status_2_hotness * avg_status_2_hotness / avg_status_1_hotness;
+					if (guess_avg_status_3_hotness >= 0.2) {
+						ssd->gc_cnt_before_update_thre = 3;
+						gc_modify_flag = 1;
+					}
+				}
+			} else if (ssd->gc_cnt_before_update_thre == 1) {
+				if (avg_status_1_hotness < 0.2 && ssd->status_remain_1_cnt != 0) {
+					ssd->gc_cnt_before_update_thre = 0;
+					gc_modify_flag = 1;
+				} else {
+					double guess_avg_status_2_hotness = avg_status_1_hotness * avg_status_1_hotness / avg_status_0_hotness;
+					if (guess_avg_status_2_hotness >= 0.2) {
+						ssd->gc_cnt_before_update_thre = 2;
+						gc_modify_flag = 1;
+					}
+				}
+			} else if (ssd->gc_cnt_before_update_thre == 0) {
+				double guess_avg_status_1_hotness = avg_status_0_hotness * 0.5;
+				if (guess_avg_status_1_hotness >= 0.2) {
+					ssd->gc_cnt_before_update_thre = 1;
+					gc_modify_flag = 1;
+				}
 			}
-		}	
-		ftl_log("goodness:%lf\n", goodness);
-
-		ftl_log("0_cnt:%lf 1_cnt:%lf 2_cnt:%lf 3_cnt:%lf\n", ssd->status_remain_0_cnt, ssd->status_remain_1_cnt, ssd->status_remain_2_cnt, ssd->status_remain_3_cnt);
-		ftl_log("0_hotness:%lf 1_hotness:%lf 2_hotness:%lf 3_hotness:%lf\n", ssd->status_remain_0_hotness / ssd->status_remain_0_cnt, ssd->status_remain_1_hotness / ssd->status_remain_1_cnt, ssd->status_remain_2_hotness /ssd->status_remain_2_cnt, ssd->status_remain_3_hotness/ssd->status_remain_3_cnt);
-		// ssd->gap[ssd->write_hotness_thre] = 0;
-		// ssd->goodness[ssd->write_hotness_thre] = goodness;
-		// for (int i = 0; i < 4; i ++) {
-		// 	if (i != ssd->write_hotness_thre) {
-		// 		ssd->gap[i] ++;
-		// 		if (ssd->gap[i] >= 5) {
-		// 			ssd->gap[i] = 0;
-		// 			ssd->goodness[i] = 0;
-		// 		}
-		// 	}
-		// }
-		// ftl_log("goodness:%lf\n", goodness);
-
-		// // 记录到下个周期前的goodness
-		// ssd->cur_goodness = goodness;
-
-
-		// // 调整读写区域比例的
-		// if (ssd->observe_flag >= 1) {
-		// 	ssd->observe_flag ++;
-		// 	if (ssd->observe_flag == 3) {
-		// 		double goodness_delta = ssd->pre_goodeness - (ssd->cur_goodness + ssd->cur_goodness1) / 2.0;
-		// 		struct ru* tmp_ru = select_hotless_ra_ru(ssd);
-		// 		double left = goodness_delta * ssd->cur_wr_ratio;
-		// 		double right = tmp_ru->read_hotness / tmp_ru->vpc * (1 - ssd->cur_wr_ratio );
-		// 		ftl_log("left:%lf right:%lf\n", left, right);
-		// 		ftl_log("write_ratio:%lf read_ratio:%lf\n",ssd->cur_wr_ratio, 1 - ssd->cur_wr_ratio);
-		// 		// 回退
-		// 		if (left > right) {
-		// 			ssd->sp.ra_max_cnt --;
-		// 		}
-		// 		ssd->observe_flag = 0;
-		// 		ssd->sp.dynamic_ra_flag = 1;
-		// 	} else
-		// 		ssd->cur_goodness1 = goodness;
-		// }
-
-		// // 尝试调整tw
-		// int tw_change_flag = 0;
-		// if (goodness < 14 && ssd->sp.dynamic_tw_flag) {
-		// 	tw_change_flag = 1;
-		// 	double left_goodness = ssd->write_hotness_thre == 0? -10000 : ssd->goodness[ssd->write_hotness_thre - 1];
-		// 	double right_goodness = ssd->write_hotness_thre == 3? -10000 : ssd->goodness[ssd->write_hotness_thre + 1];
-		// 	if (goodness < left_goodness || goodness < right_goodness) {
-		// 		if (left_goodness > right_goodness) {
-		// 			ssd->write_hotness_thre = ssd->write_hotness_thre == 0 ? 0 : ssd->write_hotness_thre - 1;
-		// 			ssd->gc_cnt_before_update_thre = 3;
-		// 		} else {
-		// 			ssd->write_hotness_thre = ssd->write_hotness_thre == 3 ? 3 : ssd->write_hotness_thre + 1;
-		// 			ssd->gc_cnt_before_update_thre = 3;
-		// 		}
-		// 	} else if (ssd->status_34_cnt < ssd->status_4_cnt && left_goodness == 0) {
-		// 		// 说明当前写入阈值大了，大量请求进入QLC
-		// 		ssd->write_hotness_thre = ssd->write_hotness_thre == 0 ? 0 : ssd->write_hotness_thre - 1;
-		// 		ssd->gc_cnt_before_update_thre = 3;
-		// 	} else if (ssd->status_34_cnt >= ssd->status_4_cnt && right_goodness == 0) {
-		// 		// 说明当前写入阈值小了，大量冷请求进入SLC又被迁移
-		// 		ssd->write_hotness_thre = ssd->write_hotness_thre == 3 ? 3 : ssd->write_hotness_thre + 1;
-		// 		ssd->gc_cnt_before_update_thre = 3;
-		// 	} else {
-		// 		tw_change_flag = 0;
-		// 	}
-		// }
-
-		// tw不调整时可调整tm
-		// if (ssd->sp.dynamic_tm_flag && tw_change_flag == 0) {
-		// 	int flag = 0;
-		// 	switch(ssd->gc_cnt_before_update_thre) {
-		// 		case 3 :
-		// 			double ratio_04 = ratio_0 * ratio_01 * ratio_12 * ratio_23;
-		// 			if (ratio_04 * 12 + ratio_30 * 5 - ratio_34 * 17 > 0)
-		// 				flag = 1;
-		// 			break;
-		// 		case 2:
-		// 			double ratio_04 = ratio_0 * ratio_01 * ratio_12;
-		// 			if (ratio_04 * 8 + ratio_20 * 5 - ratio_24 * 12 > 0)
-		// 				flag = 1;
-		// 			break;
-		// 		case 1:
-		// 			double ratio_04 = ratio_0 * ratio_01;
-		// 			if (ratio_04 * 12 + ratio_10 * 5 - ratio_14 * 17 > 0)
-		// 				flag = 1;
-		// 			break;
-		// 		case 0:
-		// 			double ratio_04 = ratio_0 * ratio_01 * ratio_12;
-		// 			if (ratio_04 * 12 + ratio_30 * 5 - ratio_34 * 17 > 0)
-		// 				flag = 1;
-		// 			break;
-		// 	}
-		// 	if (flag == 1) {
-		// 		ssd->gc_cnt_before_update_thre --;
-		// 		if (ssd->gc_cnt_before_update_thre < 0) {
-		// 			ssd->write_hotness_thre = ssd->write_hotness_thre == 3 ? 3 : ssd->write_hotness_thre + 1;
-		// 			ssd->gc_cnt_before_update_thre = 3;
-		// 			flag = 1;
-		// 		}
-		// 	}	
-		// }
-		
-		// ssd->pre_status_0_cnt = ssd->status_0_cnt;
-		// ssd->pre_status_00_cnt = ssd->status_00_cnt;
-		// ssd->pre_status_01_cnt = ssd->status_01_cnt;
-		// ssd->pre_status_12_cnt = ssd->status_12_cnt;
-		// ssd->pre_status_10_cnt = ssd->status_10_cnt;
-		// ssd->pre_status_23_cnt = ssd->status_23_cnt;
-		// ssd->pre_status_20_cnt = ssd->status_20_cnt;
-		// ssd->pre_status_34_cnt = ssd->status_34_cnt;
-		// ssd->pre_status_30_cnt = ssd->status_30_cnt;
-		// ssd->pre_status_4_cnt = ssd->status_4_cnt;
-		// ssd->pre_status_24_cnt = ssd->status_24_cnt;
-		// ssd->pre_status_14_cnt = ssd->status_14_cnt;
-		// ssd->pre_status_04_cnt = ssd->status_04_cnt;
-
-		ssd->status_0_cnt = 0;
-		ssd->status_00_cnt = 0;
-		ssd->status_01_cnt = 0;
-		ssd->status_12_cnt = 0;
-		ssd->status_10_cnt = 0;
-		ssd->status_23_cnt = 0;
-		ssd->status_20_cnt = 0;
-		ssd->status_34_cnt = 0;
-		ssd->status_30_cnt = 0;
-		ssd->status_4_cnt = 0;
-		ssd->status_24_cnt = 0;
-		ssd->status_14_cnt = 0;
-		ssd->status_04_cnt = 0;
-
-		ftl_log("write_hotness_thre:%d gc_cnt_before_update_thre:%d\n", ssd->write_hotness_thre, ssd->gc_cnt_before_update_thre);
-			
-		ssd->cnt_window = 0;
+		}
+		if (ssd->cnt_window == 0 || gc_modify_flag == 1) {
+			ftl_log("0_cnt:%lf 1_cnt:%lf 2_cnt:%lf 3_cnt:%lf\n", ssd->status_remain_0_cnt, ssd->status_remain_1_cnt, ssd->status_remain_2_cnt, ssd->status_remain_3_cnt);
+			ftl_log("0_hotness:%lf 1_hotness:%lf 2_hotness:%lf 3_hotness:%lf\n", avg_status_0_hotness, avg_status_1_hotness, avg_status_2_hotness, avg_status_3_hotness);
+			ftl_log("write_hotness_thre:%d gc_cnt_before_update_thre:%d\n", ssd->write_hotness_thre, ssd->gc_cnt_before_update_thre);
+		}
+		ssd->cnt_window ++;
+		ssd->slc_write_cnt = 0;
+		ssd->qlc_migrate_cnt = 0;
 	}
+	// // 调整准入阈值和迁移阈值
+	// ssd->cnt_window ++;
+	// if (ssd->cnt_window == 1 && ssd->sp.write_mode == 1 && ssd->sp.dynamic_tm_flag == 1) {
+	// 	double avg_status_0_hotness = ssd->status_remain_0_cnt == 0 ? 0 : ssd->status_remain_0_hotness / ssd->status_remain_0_cnt;
+	// 	double avg_status_1_hotness = ssd->status_remain_1_cnt == 0 ? 0 : ssd->status_remain_1_hotness / ssd->status_remain_1_cnt;
+	// 	double avg_status_2_hotness = ssd->status_remain_2_cnt == 0 ? 0 : ssd->status_remain_2_hotness / ssd->status_remain_2_cnt;
+	// 	double avg_status_3_hotness = ssd->status_remain_3_cnt == 0 ? 0 : ssd->status_remain_3_hotness / ssd->status_remain_3_cnt;
+
+	// 	// 满且热
+	// 	if 
+
+
+	// 	// 数据热度倒挂时，提高写入阈值
+	// 	double reduce_ratio0 = avg_status_0_hotness == 0 ? 0 : avg_status_1_hotness / avg_status_0_hotness;
+	// 	double reduce_ratio1 = avg_status_1_hotness == 0 ? 0 : avg_status_2_hotness / avg_status_1_hotness;
+	// 	// double reduce_ratio2 = avg_status_2_hotness == 0 ? 0 : avg_status_3_hotness / avg_status_2_hotness;
+	// 	if (reduce_ratio0 > 1.1) {
+	// 		ssd->write_hotness_thre = ssd->write_hotness_thre == 3 ? 3 : ssd->write_hotness_thre + 1;
+	// 	} else {
+	// 		if (reduce_ratio0 < 0.9) {
+	// 			ssd->write_hotness_thre = ssd->write_hotness_thre == 0? 0 : ssd->write_hotness_thre - 1;
+	// 		}
+	// 		// 降低迁移阈值
+	// 		if (ssd->gc_cnt_before_update_thre == 3) {
+	// 			if (avg_status_3_hotness < 0.2 && ssd->status_remain_3_cnt != 0)
+	// 				ssd->gc_cnt_before_update_thre = 2;
+	// 			else {
+	// 				// 区域3数据过热，提高写入阈值
+	// 				if (avg_status_3_hotness >= 0.5)
+	// 					ssd->write_hotness_thre = ssd->write_hotness_thre == 3 ? 3 : ssd->write_hotness_thre + 1;
+	// 			}
+	// 		} else if (ssd->gc_cnt_before_update_thre == 2) {
+	// 			if (avg_status_2_hotness < 0.2 && ssd->status_remain_2_cnt != 0)
+	// 				ssd->gc_cnt_before_update_thre = 1;
+	// 			else {
+	// 				double guess_avg_status_3_hotness = avg_status_2_hotness * reduce_ratio1;
+	// 				if (guess_avg_status_3_hotness >= 0.2)
+	// 					ssd->gc_cnt_before_update_thre = 3;
+	// 			}
+	// 		} else if (ssd->gc_cnt_before_update_thre == 1) {
+	// 			if (avg_status_1_hotness < 0.2 && ssd->status_remain_1_cnt != 0)
+	// 				ssd->gc_cnt_before_update_thre = 0;
+	// 			else {
+	// 				double guess_avg_status_2_hotness = avg_status_1_hotness * reduce_ratio0;
+	// 				if (guess_avg_status_2_hotness >= 0.2)
+	// 					ssd->gc_cnt_before_update_thre = 2;
+	// 			}
+	// 		} else if (ssd->gc_cnt_before_update_thre == 0) {
+	// 			if (avg_status_0_hotness >= 0.3)
+	// 				ssd->gc_cnt_before_update_thre = 1;
+	// 		} 
+	// 	}
+	// 	ftl_log("0_cnt:%lf 1_cnt:%lf 2_cnt:%lf 3_cnt:%lf\n", ssd->status_remain_0_cnt, ssd->status_remain_1_cnt, ssd->status_remain_2_cnt, ssd->status_remain_3_cnt);
+	// 	ftl_log("0_hotness:%lf 1_hotness:%lf 2_hotness:%lf 3_hotness:%lf\n", avg_status_0_hotness, avg_status_1_hotness, avg_status_2_hotness, avg_status_3_hotness);
+	// 	ftl_log("write_hotness_thre:%d gc_cnt_before_update_thre:%d\n", ssd->write_hotness_thre, ssd->gc_cnt_before_update_thre);
+	// 	ssd->cnt_window = 0;
+	// }
+	// if (ssd->cnt_window == 1 && ssd->sp.write_mode == 1 && ssd->sp.dynamic_tm_flag == 1) {
+	// 	// double goodness = ssd->status_0_cnt * 17.0 + ssd->status_1_cnt * 13.0 + ssd->status_2_cnt * 9.0 + ssd->status_3_cnt * 5.0 - ssd->status_4_cnt * (4.0 * ssd->gc_cnt_before_update_thre + 4.0);
+	// 	// goodness /= ssd->status_0_cnt + ssd->status_1_cnt + ssd->status_2_cnt + ssd->status_3_cnt + ssd->status_4_cnt + ssd->status_5_cnt;
+	// 	// double sub_rate = 0.9;
+	// 	// ssd->status_0_cnt = ssd->status_0_cnt * sub_rate + ssd->pre_status_0_cnt * (1- sub_rate);
+	// 	// ssd->status_00_cnt = ssd->status_00_cnt * sub_rate + ssd->pre_status_00_cnt * (1- sub_rate);
+	// 	// ssd->status_01_cnt = ssd->status_01_cnt * sub_rate + ssd->pre_status_01_cnt * (1- sub_rate);
+	// 	// ssd->status_10_cnt = ssd->status_10_cnt * sub_rate + ssd->pre_status_10_cnt * (1- sub_rate);
+	// 	// ssd->status_12_cnt = ssd->status_12_cnt * sub_rate + ssd->pre_status_12_cnt * (1- sub_rate);
+	// 	// ssd->status_20_cnt = ssd->status_20_cnt * sub_rate + ssd->pre_status_20_cnt * (1- sub_rate);
+	// 	// ssd->status_23_cnt = ssd->status_23_cnt * sub_rate + ssd->pre_status_23_cnt * (1- sub_rate);
+	// 	// ssd->status_30_cnt = ssd->status_30_cnt * sub_rate + ssd->pre_status_30_cnt * (1- sub_rate);
+	// 	// ssd->status_34_cnt = ssd->status_34_cnt * sub_rate + ssd->pre_status_34_cnt * (1- sub_rate);
+	// 	// ssd->status_4_cnt = ssd->status_4_cnt * sub_rate + ssd->pre_status_4_cnt * (1- sub_rate);
+	// 	// ssd->status_14_cnt = ssd->status_14_cnt * sub_rate + ssd->pre_status_14_cnt * (1- sub_rate);
+	// 	// ssd->status_24_cnt = ssd->status_24_cnt * sub_rate + ssd->pre_status_24_cnt * (1- sub_rate);
+	// 	// ssd->status_04_cnt = ssd->status_04_cnt * sub_rate + ssd->pre_status_04_cnt * (1- sub_rate);
+	// 	//ftl_log("0:%lf 00:%lf 01:%lf 10:%lf 12:%lf 20:%lf 23:%lf 30:%lf 34:%lf 4:%lf 14:%lf 24:%lf 04:%lf\n", ssd->status_0_cnt, ssd->status_00_cnt,  ssd->status_01_cnt, ssd->status_10_cnt, ssd->status_12_cnt, ssd->status_20_cnt, ssd->status_23_cnt, ssd->status_30_cnt, ssd->status_34_cnt, ssd->status_4_cnt, ssd->status_14_cnt, ssd->status_24_cnt, ssd->status_04_cnt);
+	// 	double ratio_0 = (ssd->status_0_cnt + 1) * 1.0 / (ssd->status_0_cnt + ssd->status_4_cnt + 2);
+	// 	// double ratio_4 = 1 - ratio_0;
+	// 	int gc_thre_flag = 0;
+	// 	double goodness = 0;
+	// 	if (ssd->gc_cnt_before_update_thre == 3) {
+	// 		double ratio_00 = (ssd->status_00_cnt + 1) * 1.0 / (ssd->status_00_cnt + ssd->status_01_cnt + 2);
+	// 		double ratio_01 = 1 - ratio_00;
+	// 		double ratio_12 = (ssd->status_12_cnt + 1) * 1.0 / (ssd->status_12_cnt + ssd->status_10_cnt + 2);
+	// 		double ratio_10 = 1 - ratio_12;
+	// 		double ratio_23 = (ssd->status_23_cnt + 1) * 1.0 / (ssd->status_23_cnt + ssd->status_20_cnt + 2);
+	// 		double ratio_20 = 1 - ratio_23;
+	// 		double ratio_34 = (ssd->status_34_cnt + 1) * 1.0 / (ssd->status_34_cnt + ssd->status_30_cnt + 2);
+	// 		double ratio_30 = 1 - ratio_34;
+	// 		double ratio00 = ratio_0 * ratio_00;
+	// 		double ratio010 = ratio_0 * ratio_01 * ratio_10;
+	// 		double ratio0120 = ratio_0 * ratio_01 * ratio_12 * ratio_20;
+	// 		double ratio01230 = ratio_0 * ratio_01 * ratio_12 * ratio_23 * ratio_30;
+	// 		double ratio01234 = ratio_0 * ratio_01 * ratio_12 * ratio_23 * ratio_34;
+	// 		goodness = 17.0 * ratio00 + 13.0 * ratio010 + 9.0 * ratio0120 + 5.0 * ratio01230 - 16.0 * ratio01234;
+
+	// 		double ratio0124 = ratio01230 + ratio01234;
+	// 		if (ratio0124 * 12 + ratio01230 * 5 - ratio01234 * 16 < ratio0124 * 0)
+	// 			gc_thre_flag = 1;
+	// 	} else if (ssd->gc_cnt_before_update_thre == 2) {
+	// 		double ratio_00 = (ssd->status_00_cnt + 1) * 1.0 / (ssd->status_00_cnt + ssd->status_01_cnt + 2);
+	// 		double ratio_01 = 1 - ratio_00;
+	// 		double ratio_12 = (ssd->status_12_cnt + 1) * 1.0 / (ssd->status_12_cnt + ssd->status_10_cnt + 2);
+	// 		double ratio_10 = 1 - ratio_12;
+	// 		double ratio_24 = (ssd->status_24_cnt + 1) * 1.0 / (ssd->status_24_cnt + ssd->status_20_cnt + 2);
+	// 		double ratio_20 = 1 - ratio_24;
+
+	// 		double ratio00 = ratio_0 * ratio_00;
+	// 		double ratio010 = ratio_0 * ratio_01 * ratio_10;
+	// 		double ratio0120 = ratio_0 * ratio_01 * ratio_12 * ratio_20;
+	// 		double ratio0124 = ratio_0 * ratio_01 * ratio_12 * ratio_24;
+	// 		goodness = 17.0 * ratio00 + 13.0 * ratio010 + 9.0 * ratio0120 - 12.0 * ratio0124;
+			
+	// 		double ratio014 = ratio0120 + ratio0124;
+	// 		if (ratio014 * 8 + ratio0120 * 9 - ratio0124 * 12 < ratio014 * 0)
+	// 			gc_thre_flag = 1;
+	// 	} else if (ssd->gc_cnt_before_update_thre == 1) {
+	// 		double ratio_00 = (ssd->status_00_cnt + 1) * 1.0 / (ssd->status_00_cnt + ssd->status_01_cnt + 2);
+	// 		double ratio_01 = 1 - ratio_00;
+	// 		double ratio_14 = (ssd->status_14_cnt + 1) * 1.0 / (ssd->status_14_cnt + ssd->status_10_cnt + 2);
+	// 		double ratio_10 = 1 - ratio_14;
+
+	// 		double ratio00 = ratio_0 * ratio_00;
+	// 		double ratio010 = ratio_0 * ratio_01 * ratio_10;
+	// 		double ratio014 = ratio_0 * ratio_01 * ratio_14;
+	// 		goodness = 17.0 * ratio00 + 13.0 * ratio010 - 8.0 * ratio014;
+			
+	// 		double ratio04 = ratio014 + ratio010;
+	// 		if (ratio04 * 4 + ratio010 * 13 - ratio014 * 8 < ratio04 * 0)
+	// 			gc_thre_flag = 1;
+	// 	} else if (ssd->gc_cnt_before_update_thre == 0) {
+	// 		double ratio_04 = (ssd->status_04_cnt + 1) * 1.0 / (ssd->status_00_cnt + ssd->status_04_cnt + 2);
+	// 		double ratio_00 = 1 - ratio_04;
+
+	// 		double ratio00 = ratio_0 * ratio_00;
+	// 		double ratio04 = ratio_0 * ratio_04;
+	// 		goodness = 17.0 * ratio00 - 4.0 * ratio04;
+			
+	// 		if (goodness < ratio_0 * 0)
+	// 			gc_thre_flag = 1;
+	// 	}
+
+	// 	// 出现拥塞，快速提升阈值
+	// 	ftl_log("slc_gc_eff:%lf slc_util:%lf\n", ssd->slc_gc_eff, ssd->slc_util);
+	// 	if (ssd->slc_gc_eff < 0.3) {
+	// 		ssd->gc_cnt_before_update_thre = 0;
+	// 		ssd->write_hotness_thre = 3;
+	// 	} else if (goodness < 5 && ssd->slc_gc_eff < 0.5)  {
+	// 		ssd->gc_cnt_before_update_thre = ssd->gc_cnt_before_update_thre == 0 ? 0 : ssd->gc_cnt_before_update_thre - 1;
+	// 		ssd->write_hotness_thre = ssd->write_hotness_thre == 3 ? 3 : ssd->write_hotness_thre + 1;
+	// 	} else if (goodness < 8 && ssd->slc_gc_eff > 0.7) {
+	// 		// 回落
+	// 		ssd->gc_cnt_before_update_thre = 3;
+	// 		ssd->write_hotness_thre = ssd->write_hotness_thre == 0 ? 0 : ssd->write_hotness_thre - 1;
+	// 	} else if (ssd->sp.dynamic_tm_flag && gc_thre_flag == 1) {
+	// 		ssd->gc_cnt_before_update_thre --;
+	// 		if (ssd->gc_cnt_before_update_thre < 0) {
+	// 			ssd->gc_cnt_before_update_thre = ssd->write_hotness_thre == 3 ? 0: 3;
+	// 			ssd->write_hotness_thre = ssd->write_hotness_thre == 3 ? 3 : ssd->write_hotness_thre + 1;
+	// 		}
+	// 	}	
+	// 	ftl_log("goodness:%lf\n", goodness);
+
+	// 	ftl_log("0_cnt:%lf 1_cnt:%lf 2_cnt:%lf 3_cnt:%lf\n", ssd->status_remain_0_cnt, ssd->status_remain_1_cnt, ssd->status_remain_2_cnt, ssd->status_remain_3_cnt);
+	// 	ftl_log("0_hotness:%lf 1_hotness:%lf 2_hotness:%lf 3_hotness:%lf\n", ssd->status_remain_0_hotness / ssd->status_remain_0_cnt, ssd->status_remain_1_hotness / ssd->status_remain_1_cnt, ssd->status_remain_2_hotness /ssd->status_remain_2_cnt, ssd->status_remain_3_hotness/ssd->status_remain_3_cnt);
+	// 	// ssd->gap[ssd->write_hotness_thre] = 0;
+	// 	// ssd->goodness[ssd->write_hotness_thre] = goodness;
+	// 	// for (int i = 0; i < 4; i ++) {
+	// 	// 	if (i != ssd->write_hotness_thre) {
+	// 	// 		ssd->gap[i] ++;
+	// 	// 		if (ssd->gap[i] >= 5) {
+	// 	// 			ssd->gap[i] = 0;
+	// 	// 			ssd->goodness[i] = 0;
+	// 	// 		}
+	// 	// 	}
+	// 	// }
+	// 	// ftl_log("goodness:%lf\n", goodness);
+
+	// 	// // 记录到下个周期前的goodness
+	// 	// ssd->cur_goodness = goodness;
+
+
+	// 	// // 调整读写区域比例的
+	// 	// if (ssd->observe_flag >= 1) {
+	// 	// 	ssd->observe_flag ++;
+	// 	// 	if (ssd->observe_flag == 3) {
+	// 	// 		double goodness_delta = ssd->pre_goodeness - (ssd->cur_goodness + ssd->cur_goodness1) / 2.0;
+	// 	// 		struct ru* tmp_ru = select_hotless_ra_ru(ssd);
+	// 	// 		double left = goodness_delta * ssd->cur_wr_ratio;
+	// 	// 		double right = tmp_ru->read_hotness / tmp_ru->vpc * (1 - ssd->cur_wr_ratio );
+	// 	// 		ftl_log("left:%lf right:%lf\n", left, right);
+	// 	// 		ftl_log("write_ratio:%lf read_ratio:%lf\n",ssd->cur_wr_ratio, 1 - ssd->cur_wr_ratio);
+	// 	// 		// 回退
+	// 	// 		if (left > right) {
+	// 	// 			ssd->sp.ra_max_cnt --;
+	// 	// 		}
+	// 	// 		ssd->observe_flag = 0;
+	// 	// 		ssd->sp.dynamic_ra_flag = 1;
+	// 	// 	} else
+	// 	// 		ssd->cur_goodness1 = goodness;
+	// 	// }
+
+	// 	// // 尝试调整tw
+	// 	// int tw_change_flag = 0;
+	// 	// if (goodness < 14 && ssd->sp.dynamic_tw_flag) {
+	// 	// 	tw_change_flag = 1;
+	// 	// 	double left_goodness = ssd->write_hotness_thre == 0? -10000 : ssd->goodness[ssd->write_hotness_thre - 1];
+	// 	// 	double right_goodness = ssd->write_hotness_thre == 3? -10000 : ssd->goodness[ssd->write_hotness_thre + 1];
+	// 	// 	if (goodness < left_goodness || goodness < right_goodness) {
+	// 	// 		if (left_goodness > right_goodness) {
+	// 	// 			ssd->write_hotness_thre = ssd->write_hotness_thre == 0 ? 0 : ssd->write_hotness_thre - 1;
+	// 	// 			ssd->gc_cnt_before_update_thre = 3;
+	// 	// 		} else {
+	// 	// 			ssd->write_hotness_thre = ssd->write_hotness_thre == 3 ? 3 : ssd->write_hotness_thre + 1;
+	// 	// 			ssd->gc_cnt_before_update_thre = 3;
+	// 	// 		}
+	// 	// 	} else if (ssd->status_34_cnt < ssd->status_4_cnt && left_goodness == 0) {
+	// 	// 		// 说明当前写入阈值大了，大量请求进入QLC
+	// 	// 		ssd->write_hotness_thre = ssd->write_hotness_thre == 0 ? 0 : ssd->write_hotness_thre - 1;
+	// 	// 		ssd->gc_cnt_before_update_thre = 3;
+	// 	// 	} else if (ssd->status_34_cnt >= ssd->status_4_cnt && right_goodness == 0) {
+	// 	// 		// 说明当前写入阈值小了，大量冷请求进入SLC又被迁移
+	// 	// 		ssd->write_hotness_thre = ssd->write_hotness_thre == 3 ? 3 : ssd->write_hotness_thre + 1;
+	// 	// 		ssd->gc_cnt_before_update_thre = 3;
+	// 	// 	} else {
+	// 	// 		tw_change_flag = 0;
+	// 	// 	}
+	// 	// }
+
+	// 	// tw不调整时可调整tm
+	// 	// if (ssd->sp.dynamic_tm_flag && tw_change_flag == 0) {
+	// 	// 	int flag = 0;
+	// 	// 	switch(ssd->gc_cnt_before_update_thre) {
+	// 	// 		case 3 :
+	// 	// 			double ratio_04 = ratio_0 * ratio_01 * ratio_12 * ratio_23;
+	// 	// 			if (ratio_04 * 12 + ratio_30 * 5 - ratio_34 * 17 > 0)
+	// 	// 				flag = 1;
+	// 	// 			break;
+	// 	// 		case 2:
+	// 	// 			double ratio_04 = ratio_0 * ratio_01 * ratio_12;
+	// 	// 			if (ratio_04 * 8 + ratio_20 * 5 - ratio_24 * 12 > 0)
+	// 	// 				flag = 1;
+	// 	// 			break;
+	// 	// 		case 1:
+	// 	// 			double ratio_04 = ratio_0 * ratio_01;
+	// 	// 			if (ratio_04 * 12 + ratio_10 * 5 - ratio_14 * 17 > 0)
+	// 	// 				flag = 1;
+	// 	// 			break;
+	// 	// 		case 0:
+	// 	// 			double ratio_04 = ratio_0 * ratio_01 * ratio_12;
+	// 	// 			if (ratio_04 * 12 + ratio_30 * 5 - ratio_34 * 17 > 0)
+	// 	// 				flag = 1;
+	// 	// 			break;
+	// 	// 	}
+	// 	// 	if (flag == 1) {
+	// 	// 		ssd->gc_cnt_before_update_thre --;
+	// 	// 		if (ssd->gc_cnt_before_update_thre < 0) {
+	// 	// 			ssd->write_hotness_thre = ssd->write_hotness_thre == 3 ? 3 : ssd->write_hotness_thre + 1;
+	// 	// 			ssd->gc_cnt_before_update_thre = 3;
+	// 	// 			flag = 1;
+	// 	// 		}
+	// 	// 	}	
+	// 	// }
+		
+	// 	// ssd->pre_status_0_cnt = ssd->status_0_cnt;
+	// 	// ssd->pre_status_00_cnt = ssd->status_00_cnt;
+	// 	// ssd->pre_status_01_cnt = ssd->status_01_cnt;
+	// 	// ssd->pre_status_12_cnt = ssd->status_12_cnt;
+	// 	// ssd->pre_status_10_cnt = ssd->status_10_cnt;
+	// 	// ssd->pre_status_23_cnt = ssd->status_23_cnt;
+	// 	// ssd->pre_status_20_cnt = ssd->status_20_cnt;
+	// 	// ssd->pre_status_34_cnt = ssd->status_34_cnt;
+	// 	// ssd->pre_status_30_cnt = ssd->status_30_cnt;
+	// 	// ssd->pre_status_4_cnt = ssd->status_4_cnt;
+	// 	// ssd->pre_status_24_cnt = ssd->status_24_cnt;
+	// 	// ssd->pre_status_14_cnt = ssd->status_14_cnt;
+	// 	// ssd->pre_status_04_cnt = ssd->status_04_cnt;
+
+	// 	ssd->status_0_cnt = 0;
+	// 	ssd->status_00_cnt = 0;
+	// 	ssd->status_01_cnt = 0;
+	// 	ssd->status_12_cnt = 0;
+	// 	ssd->status_10_cnt = 0;
+	// 	ssd->status_23_cnt = 0;
+	// 	ssd->status_20_cnt = 0;
+	// 	ssd->status_34_cnt = 0;
+	// 	ssd->status_30_cnt = 0;
+	// 	ssd->status_4_cnt = 0;
+	// 	ssd->status_24_cnt = 0;
+	// 	ssd->status_14_cnt = 0;
+	// 	ssd->status_04_cnt = 0;
+
+	// 	ftl_log("write_hotness_thre:%d gc_cnt_before_update_thre:%d\n", ssd->write_hotness_thre, ssd->gc_cnt_before_update_thre);
+			
+	// 	ssd->cnt_window = 0;
+	// }
 
 	// 修改ru的相关信息
 	if (mode == 0) {
@@ -2766,10 +2965,11 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 			ssd->total_slc_ra_read_hotness -= victim_ru->read_hotness;
 			ssd->total_slc_ra_write_hotness -= victim_ru->write_hotness;
 		}
-		ssd->slc_valid_cnt -= victim_ru->vpc / 4;
 	}
+	
 	victim_ru->write_hotness = 0;
 	victim_ru->read_hotness = 0;
+	//ftl_log("gc id:%d read_hotness:%lf\n", victim_ru->id, victim_ru->read_hotness);
 	victim_ru->victim_pre = 0;
 	
 	ftl_log("ru:%d erase_cnt:%lf\n", victim_ru->id, victim_ru->erase);
@@ -2795,24 +2995,24 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 	victim_ru->vpc = 0;
 	
     // 块到达磨损上限，弃用整个超级块
-	double cur_endurance = mode == 0? victim_ru->rand_rate * (double) spp->endurance_slc : victim_ru->rand_rate * (double) spp->endurance_qlc;
-    if (victim_ru->erase >= cur_endurance) {
-		QTAILQ_INSERT_TAIL(&rum->bad_ru_list, victim_ru, entry);
-		rum->bad_ru_cnt++;
-		ftl_log("Ru %d becomes bad!\n", victim_ru->id);
-		int cur_slc_ru = ssd->rums_slc[0].tt_rus - ssd->rums_slc[0].bad_ru_cnt;
-		int cur_qlc_ru = ssd->rums_qlc[0].tt_rus - ssd->rums_qlc[0].bad_ru_cnt;
-		double eop = (cur_slc_ru / 4.0 + cur_qlc_ru) / ssd->sp.tt_rus;
-		ftl_log("eop:%lf\n", eop);
-		if (eop < (spp->qlc_op * 1.0 / (spp->slc_op + spp->qlc_op))) {
-			output_info_log(ssd);
-			ftl_err("SSD reaches its end of the life!\n");
-			abort();	
-		}
-	} else {
+	// double cur_endurance = mode == 0? victim_ru->rand_rate * (double) spp->endurance_slc : victim_ru->rand_rate * (double) spp->endurance_qlc;
+    // if (victim_ru->erase >= cur_endurance) {
+	// 	QTAILQ_INSERT_TAIL(&rum->bad_ru_list, victim_ru, entry);
+	// 	rum->bad_ru_cnt++;
+	// 	ftl_log("Ru %d becomes bad!\n", victim_ru->id);
+	// 	int cur_slc_ru = ssd->rums_slc[0].tt_rus - ssd->rums_slc[0].bad_ru_cnt;
+	// 	int cur_qlc_ru = ssd->rums_qlc[0].tt_rus - ssd->rums_qlc[0].bad_ru_cnt;
+	// 	double eop = (cur_slc_ru / 4.0 + cur_qlc_ru) / ssd->sp.tt_rus;
+	// 	ftl_log("eop:%lf\n", eop);
+	// 	if (eop < (spp->qlc_op * 1.0 / (spp->slc_op + spp->qlc_op))) {
+	// 		output_info_log(ssd);
+	// 		ftl_err("SSD reaches its end of the life!\n");
+	// 		abort();	
+	// 	}
+	// } else {
 		// 静态磨损均衡，把最低磨损的ru数据迁移到当前已被gc的ru中，然后低磨损ru插入free_ru_list
 		// SLC区域和QLC区域单独执行静态磨损均衡
-		if (ssd->sp.wl_mode == 0 || ssd->sp.wl_mode == 1 || ssd->sp.wl_mode == 2) {
+		if (ssd->sp.wl_mode == 1 || ssd->sp.wl_mode == 2) {
 			int youngest_ru_id = -1;
 			double youngest_ru_erase = 1000000;
 			double erase_sum = 0; // 磨损总次数
@@ -3036,7 +3236,7 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 		}
     	QTAILQ_INSERT_TAIL(&rum->free_ru_list, victim_ru, entry);
 		rum->free_ru_cnt++;
-    }
+    // }
 	return;
 }
 
@@ -3200,13 +3400,20 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 		
 		// 如果读区域有备份，直接从读区域读
 		if (mapped_ppa(&back_ppa)) {
-			ppa = back_ppa;
+			struct ru *back_up_ru = get_ru(ssd, &back_ppa);
+			double pre_read_hotness = ssd->read_hotness[lpn];
+			ssd->read_hotness[lpn] = add_hotness(ssd->read_hotness[lpn], 15);
+			back_up_ru->read_hotness = back_up_ru->read_hotness + ssd->read_hotness[lpn] - pre_read_hotness;
+			if (back_up_ru->mode == 0) {
+				if (back_up_ru->ruhid == 0)
+					ssd->total_slc_wa_read_hotness = ssd->total_slc_wa_read_hotness + ssd->read_hotness[lpn] - pre_read_hotness;
+				else if (back_up_ru->ruhid == 1)
+					ssd->total_slc_ra_read_hotness = ssd->total_slc_ra_read_hotness + ssd->read_hotness[lpn] - pre_read_hotness;
+			}
+			back_up_ru->victim_pre = get_ru_victim_pre(ssd, back_up_ru);
 		}
-		// 读区域没有备份，从原始数据读
-		else {
-			// 重新获取
-			ppa = get_maptbl_ent(ssd, lpn);
-		}
+
+		ppa = get_maptbl_ent(ssd, lpn);
 		struct nand_cmd srd;
 		srd.type = USER_IO;
 
@@ -3221,8 +3428,13 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 				ssd->total_slc_ra_read_hotness = ssd->total_slc_ra_read_hotness + ssd->read_hotness[lpn] - pre_read_hotness;
 		}
 		cur_ru->victim_pre = get_ru_victim_pre(ssd, cur_ru);
-
 		int mode = cur_ru->mode;
+
+		// 若存在备份则读备份
+		if (mapped_ppa(&back_ppa)) {
+			struct ru *back_up_ru = get_ru(ssd, &back_ppa);
+			mode = back_up_ru->mode;
+		}
 		
 		if (mode == 0) {
 			srd.cmd = NAND_SLC_READ;
@@ -3238,7 +3450,11 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 		// lRUCachePut(read_buffer, lpn, 0);
 
 		srd.stime = req->stime;
-		sublat = ssd_advance_status(ssd, &ppa, &srd);
+		if (mapped_ppa(&back_ppa)) {
+			sublat = ssd_advance_status(ssd, &back_ppa, &srd);
+		} else
+			sublat = ssd_advance_status(ssd, &ppa, &srd);
+		// ftl_log("%"PRIu64",lpn(%"PRId64") mapped to mode:%d\n", sublat, lpn, cur_ru->mode);
 		sublat += 1000;
 		maxlat = (sublat > maxlat) ? sublat : maxlat;
     }
@@ -3277,6 +3493,8 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 		ssd->read_req_cnt = 0;
 		ssd->wr_ratio_cnt_window = 0;
 	}
+
+	(ssd->sp).pages_from_host += RG_DEGREE;
 	
 	for (int i = 0; i < RG_DEGREE; i++) {
 		DLinkedNode *tail = removeTail(write_buffer);
@@ -3317,7 +3535,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 						ssd->status_remain_2_cnt --;
 					} else if (ssd->gc_cnt_before_update[lpn] == 3) {
 						ssd->status_remain_0_cnt ++;
-						ssd->status_remain_2_cnt --;
+						ssd->status_remain_3_cnt --;
 					}
 				} else if (spp->write_mode == 2) {
 					if (ssd->combo_gc_cnt[lpn] == 0) {
@@ -3347,7 +3565,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 						ssd->status_30_cnt ++;
 						ssd->status_update_0_cnt ++;
 						ssd->status_remain_0_cnt ++;
-						ssd->status_remain_2_cnt --;
+						ssd->status_remain_3_cnt --;
 						if (ssd->combo_warm_bit[lpn] == 1) {
 							ssd->status_update_3_cnt --;
 						}
@@ -3361,7 +3579,6 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 			uint16_t old_rgid = (ppa.g.ch * spp->luns_per_ch + ppa.g.lun) / RG_DEGREE;
 			mark_page_invalid(ssd, &ppa, old_rgid); 
             set_rmap_ent(ssd, INVALID_LPN, &ppa);
-			ssd->gc_cnt[lpn] = 0;
         }
 
 		// 若写入的LPN在读区域有备份，则去除原有映射，将数据写入写区域，保证读区域数据不脏
@@ -3372,20 +3589,19 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 			ssd->back_maptbl[lpn].ppa = UNMAPPED_PPA;
 		}
 
-		ssd->slc_util = ssd->slc_valid_cnt * 4.0 / ssd->sp.pgs_per_ru / ssd->rums_slc[0].tt_rus;
 
 		// 基于动态变化的热度阈值
 		if (spp->write_mode == 1) {
 			//double slc_util = ssd->slc_valid_cnt * 4.0 / (ssd->rums_slc[0].tt_rus * ssd->sp.pgs_per_ru);
-			if (ppa_map_flag == 1) {
-				write_flag = 0;
-			}
+			// if (ppa_map_flag == 1) {
+			// 	write_flag = 0;
+			// }
 			// } else if (slc_util > 0.8) {
 			// 	// 利用率过高时直接写入到QLC，防止被大量新写入给占满空间
 			// 	ssd->write_hotness_thre = 3;
 			// 	ssd->gc_cnt_before_update_thre = 0;
 			// }
-			else if (ssd->write_hotness[lpn] >= ssd->write_hotness_thre) {
+			if (ssd->write_hotness[lpn] >= ssd->write_hotness_thre) {
 				write_flag = 0;
 				ssd->status_0_cnt ++;
 				if (ppa_map_flag != 1) {
@@ -3397,9 +3613,6 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 				ssd->status_4_cnt ++;
 			}
 		}
-
-		ssd->lpnwtbl[lpn]++;
-		ssd->write_hotness[lpn] = add_hotness(ssd->write_hotness[lpn], 3);
 
 		// VIS工作
 		if (spp->write_mode == 0) {
@@ -3415,11 +3628,19 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 				}
 			}
 		}
-		
-		if (spp->write_mode == 3) {
-			write_flag = 0;
-		}
 
+		if (spp->write_mode == 3) {
+			// write_flag = 0;
+			// if (ssd->slc_util < 0.5 && ssd->write_hotness[lpn] >= 1) {
+			// 	write_flag = 0;
+			// } else if (ssd->write_hotness[lpn] >= 2) {
+			if (ssd->write_hotness[lpn] >= 1) {
+				write_flag = 0;
+			} else {
+				write_flag = 1;
+			}
+		}
+		
 		// double cur_slc_wa_avg_hotness = 0;
 		// double cur_slc_ra_avg_hotness = 0;
 		// double cur_write_hotness = 0;
@@ -3438,6 +3659,9 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 				write_flag = 1;
 			}
 		}
+
+		ssd->lpnwtbl[lpn]++;
+		ssd->write_hotness[lpn] = add_hotness(ssd->write_hotness[lpn], 3);
 
 		if (write_flag) {
 			ruhid = 2;
@@ -3487,7 +3711,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 			ssd->rums_qlc[0].write_cnt ++;
 		else {
 			ssd->rums_slc[0].write_cnt ++;
-			if (spp->write_mode == 0)
+			if (spp->write_mode == 0 || spp->write_mode == 1)
 				ssd->slc_write_cnt ++;
 		}
 
@@ -3512,7 +3736,8 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 
         /* need to advance the write pointer here */
 		ssd_advance_fdp_write_pointer(ssd, 0, 0, ruhid, false, mode);
-
+		// struct ru *ru = get_ru(ssd, &ppa);
+		// ftl_log("write lpn(%"PRId64") mapped to mode:%d\n", lpn, ru->mode);
 
         struct nand_cmd swr;
         swr.type = USER_IO;
@@ -3540,8 +3765,6 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     uint64_t start_lpn = lba / spp->secs_per_pg;
     uint64_t end_lpn = (lba + len - 1) / spp->secs_per_pg;
 
-	(ssd->sp).pages_from_host += (end_lpn - start_lpn) + 1;
-	
     uint64_t lpn;
     uint64_t curlat = 0, maxlat = 0;
 
@@ -3625,7 +3848,7 @@ static void *ftl_thread(void *arg)
 	uint64_t cur_time;
 
 	// 每一秒更新热度
-	uint64_t time_gap = 50000000;
+	uint64_t time_gap =  500000000;
 	uint64_t time_gap2 = 2000000000;
 	//uint64_t time_gap3 = 100000000;
     while (1) {
@@ -3669,11 +3892,13 @@ static void *ftl_thread(void *arg)
 			ssd->status_remain_2_hotness = 0;
 			ssd->status_remain_3_hotness = 0;
 
-			for (int j = 0; j < ssd->sp.tt_pgs; j++) {
+			for (uint64_t j = 0; j < ssd->sp.tt_pgs; j++) {
 				ppa = get_maptbl_ent(ssd, j);
 				if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
 					continue;
 				}
+
+				// to do 补充 拷贝区的热度
 				ssd->read_hotness[j] = sub_hotness(ssd->read_hotness[j]);
 				ssd->write_hotness[j] = sub_hotness(ssd->write_hotness[j]);
 				ru = get_ru(ssd, &ppa);
@@ -3689,13 +3914,13 @@ static void *ftl_thread(void *arg)
 				}
 				if (ru->mode == 0) {
 					if (ssd->gc_cnt_before_update[j] == 0) {
-						ssd->status_remain_0_hotness -= ssd->write_hotness[j];
+						ssd->status_remain_0_hotness += ssd->write_hotness[j];
 					} else if (ssd->gc_cnt_before_update[j] == 1) {
-						ssd->status_remain_1_hotness -= ssd->write_hotness[j];
+						ssd->status_remain_1_hotness += ssd->write_hotness[j];
 					} else if (ssd->gc_cnt_before_update[j] == 2) {
-						ssd->status_remain_2_hotness -= ssd->write_hotness[j];
+						ssd->status_remain_2_hotness += ssd->write_hotness[j];
 					} else if (ssd->gc_cnt_before_update[j] == 3) {
-						ssd->status_remain_3_hotness -= ssd->write_hotness[j];
+						ssd->status_remain_3_hotness += ssd->write_hotness[j];
 					}
 				}
 			}

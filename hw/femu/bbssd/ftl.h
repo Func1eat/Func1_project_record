@@ -461,6 +461,7 @@ struct ssd {
 	double v_write;
 	int slc_write_cnt;
   	int qlc_migrate_cnt;
+	int my_full_flag;
 
   	// 当前存储的SLC区域的GC效率
 	double slc_util;

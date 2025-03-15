@@ -790,6 +790,7 @@ static Property femu_props[] = {
 	DEFINE_PROP_INT32("write_buffer_capacity", FemuCtrl, bb_params.write_buffer_capacity, 1024),
     DEFINE_PROP_INT32("read_buffer_capacity", FemuCtrl, bb_params.read_buffer_capacity, 1024),
     DEFINE_PROP_INT32("ra_max_cnt", FemuCtrl, bb_params.ra_max_cnt, 5),
+	DEFINE_PROP_INT32("wa_max_cnt", FemuCtrl, bb_params.wa_max_cnt, 5),
     DEFINE_PROP_INT32("dynamic_ra_flag", FemuCtrl, bb_params.dynamic_ra_flag, 0),
     DEFINE_PROP_INT32("dynamic_tw_flag", FemuCtrl, bb_params.dynamic_tw_flag, 0),
     DEFINE_PROP_INT32("dynamic_tm_flag", FemuCtrl, bb_params.dynamic_tm_flag, 0),

@@ -1315,6 +1315,7 @@ typedef struct BbCtrlParams {
     int read_migration;
     int write_mode;
     int ra_max_cnt;
+    int wa_max_cnt;
     int dynamic_ra_flag;
     int dynamic_tm_flag;
     int dynamic_tw_flag;

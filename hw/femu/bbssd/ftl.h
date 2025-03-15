@@ -42,13 +42,15 @@ enum {
     QLC_3_R = 4,
     QLC_4_R = 4,
     QLC_W = 20,
-    MID_READ_RETRY = 3,
-    OLD_READ_RETRY = 7,
-	QLC_U_1_R = 1,
+    MID_READ_RETRY1 = 2,
+    MID_READ_RETRY2 = 3,
+    OLD_READ_RETRY1 = 5,
+    OLD_READ_RETRY2 = 7,
+	  QLC_U_1_R = 1,
     QLC_U_2_R = 2,
     QLC_U_3_R = 6,
     QLC_U_4_R = 6,
-	MID_READ_U_RETRY = 7,
+	  MID_READ_U_RETRY = 7,
 };
 
 enum {
@@ -272,6 +274,8 @@ struct ssdparams {
 	// read area最大超级块数量
 	int ra_max_cnt;
 
+  int wa_max_cnt;
+
 	int dynamic_ra_flag;
 
 	int dynamic_tm_flag;
@@ -414,7 +418,7 @@ struct ssd {
 	
 	// 统计每个lpn的当前热度
 	double *read_hotness;
-	double *write_hotness;
+	int *write_hotness;
 	double *gc_cnt_before_update;
 	
 	// 记录当前热度最低的SLC块及其热度
@@ -474,14 +478,29 @@ struct ssd {
 
 	// 当前读热区已满
 	int ra_full_flag;
+  int wa_full_flag;
 
 	// 统计当前周期的正常GC数量
 	int gc_to_slc_cnt;
 	// 统计当前周期的迁移数量
 	int gc_to_qlc_cnt;
 
-	// 统计不同状态机在当前周期的数量
-	double status_0_cnt;
+	// 统计不同动作在当前周期的数量
+	double action_1_cnt;
+	double action_2_cnt;
+	double action_3_cnt;
+	double action_4_cnt;
+
+	// 统计不同热度数据淘汰和更新的概率
+	double cnt_45[4];
+	double cnt_41[4];
+	double cnt_34[4];
+	double cnt_31[4];
+	double cnt_23[4];
+	double cnt_21[4];
+	double cnt_12[4];
+	double cnt_11[4];
+
 	double status_00_cnt;
 	double status_01_cnt;
 	double status_12_cnt;
@@ -517,7 +536,7 @@ struct ssd {
 	// uint64_t status_5_total_cnt;
 	// double goodness_total;
 
-	int gc_cnt_before_update_thre;
+	int gc_cnt_before_update_thre[4];
   	int write_hotness_thre;
   	// 当前的窗口计数
 	int cnt_window;
@@ -546,7 +565,7 @@ struct ssd {
 	double *combo_gc_cnt;
 	int combo_gc_cnt_thre;
 	int *combo_warm_bit;
-	uint64_t combo_write_req_cnt;
+	uint64_t cur_write_req_cnt;
 	// warm分区的数量
 	double status_remain_0_cnt;
 	double status_remain_1_cnt;

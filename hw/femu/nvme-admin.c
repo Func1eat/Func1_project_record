@@ -853,7 +853,7 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
 		erase_qlc_cnt += ru->erase;
         fprintf(fp_ec_info, "%lf\n", ru->erase);
 	}
-	double erase_ratio = erase_slc_cnt * 27.0 / (erase_qlc_cnt * 80.0);
+	double erase_ratio = erase_slc_cnt * 3.0 * ssd->sp.qlc_op/ (erase_qlc_cnt * 80.0 * ssd->sp.slc_op);
 	fprintf(fp_ec, "%lf %lf %lf\n", erase_slc_cnt, erase_qlc_cnt, erase_ratio);
 	fclose(fp_ec);
 

@@ -1144,7 +1144,7 @@ void ssd_init(FemuCtrl *n)
 	ssd->gc_cnt_before_update = g_malloc0(spp->tt_pgs * sizeof(double));
 	ssd->combo_gc_cnt = g_malloc0(spp->tt_pgs * sizeof(double));
 	ssd->combo_warm_bit = g_malloc0(spp->tt_pgs * sizeof(int));
-	ssd->age = 0;
+	ssd->age = 3;
 	ssd->hotless_ru_hotness = 0;
 	ssd->hotless_ru_id = 0;
 	ssd->wr_hotless_ru_hotness = 0;
@@ -2097,7 +2097,7 @@ static int fdp_clean_one_block(struct ssd *ssd, struct ppa *ppa, uint16_t rgid, 
 				gc_read_page(ssd, ppa);
 				// 写入
 				if ( mode == 0) {
-					if (ssd->sp.write_mode == 1) {
+					if (ssd->sp.write_mode == 1 || ssd->sp.write_mode == 5) {
 						if (ssd->gc_cnt_before_update[cur_lpn] >= ssd->gc_cnt_before_update_thre[ssd->write_hotness[cur_lpn]]) {
 							ssd->write_migrate_count ++;
 							ssd->action_3_cnt ++;
@@ -2517,7 +2517,7 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 		lunp->gc_endtime = lunp->next_lun_avail_time;
 	}
 	
-	if (ssd->cur_write_req_cnt >= (10 * ssd->sp.pgs_per_ru / 4)  && ssd->sp.write_mode == 1) {
+	if (ssd->cur_write_req_cnt >= (10 * ssd->sp.pgs_per_ru / 4)  && (ssd->sp.write_mode == 1 || ssd->sp.write_mode == 5)) {
 		double c_before = ssd->action_1_cnt * SLC_W + ssd->action_2_cnt * (SLC_W + SLC_R) + ssd->action_3_cnt * (SLC_R + QLC_W);
 		double c_after = ssd->action_1_cnt * QLC_W;
 		
@@ -2607,7 +2607,7 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 		}
 		rum->valid_page_num -= victim_ru->vpc;
 	}
-
+	
 	victim_ru->erase = victim_ru->pe_slc * spp->slc_alpha + victim_ru->pe_qlc;
 	if (victim_ru->mode == 0) {
 		if (victim_ru->ruhid == 0) {
@@ -2619,6 +2619,16 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 		}
 	}
 	
+	if (ssd->sp.write_mode == 5) {
+		double erase_ratio = ssd->pe_slc * spp->slc_alpha * 3.0 * ssd->sp.qlc_op / (ssd->pe_qlc * 80.0 * ssd->sp.slc_op);
+		if (erase_ratio < 0.9) {
+			ssd->write_hotness_thre = ssd->write_hotness_thre == 0 ? 0 :ssd->write_hotness_thre - 1;
+		}	
+		else if (erase_ratio > 1.1) {
+			ssd->write_hotness_thre = ssd->write_hotness_thre == 3 ? 3 :ssd->write_hotness_thre + 1;
+		}	
+	}
+
 	victim_ru->write_hotness = 0;
 	victim_ru->read_hotness = 0;
 	//ftl_log("gc id:%d read_hotness:%lf\n", victim_ru->id, victim_ru->read_hotness);
@@ -3171,7 +3181,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
         if (mapped_ppa(&ppa)) {
 			if (get_ru(ssd, &ppa)->mode == 0) {
 				ppa_map_flag = 1;
-				if (spp->write_mode == 1) {
+				if (spp->write_mode == 1 || ssd->sp.write_mode == 5) {
 					if (ssd->gc_cnt_before_update[lpn] == 0) {
 						ssd->cnt_11[ssd->write_hotness[lpn]] ++;
 					} else if (ssd->gc_cnt_before_update[lpn] == 1) {
@@ -3235,7 +3245,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 
 
 		// 基于动态变化的热度阈值
-		if (spp->write_mode == 1) {
+		if (spp->write_mode == 1 || ssd->sp.write_mode == 5) {
 			if (ppa_map_flag == 1) {
 				write_flag = 0;
 			}
@@ -3344,7 +3354,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 		}
 
 		// 修改数据准入阈值
-		if (ssd->cur_write_req_cnt >= (10 * ssd->sp.pgs_per_ru / 4)  && ssd->sp.write_mode == 1) {
+		if (ssd->cur_write_req_cnt >= (10 * ssd->sp.pgs_per_ru / 4)  && (ssd->sp.write_mode == 1 || ssd->sp.write_mode == 5)) {
 			double c_before = ssd->action_1_cnt * SLC_W + ssd->action_2_cnt * (SLC_W + SLC_R) + ssd->action_3_cnt * (SLC_R + QLC_W);
 			double c_after = ssd->action_1_cnt * QLC_W;
 			
@@ -3355,7 +3365,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 
 			// 减少阈值
 			if (ratio < low_thre) {
-				ssd->write_hotness_thre = ssd->write_hotness_thre == 1? 1 : ssd->write_hotness_thre + 1;
+				ssd->write_hotness_thre = ssd->write_hotness_thre >= 1? ssd->write_hotness_thre : ssd->write_hotness_thre + 1;
 				ssd->cnt_window = 0;
 			} else if (ratio > high_thre) {
 				ssd->write_hotness_thre = ssd->write_hotness_thre == 0? 0 : ssd->write_hotness_thre - 1;
@@ -3424,7 +3434,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 			ssd->rums_qlc[0].write_cnt ++;
 		else {
 			ssd->rums_slc[0].write_cnt ++;
-			if (spp->write_mode == 0 || spp->write_mode == 1)
+			if (spp->write_mode == 0)
 				ssd->slc_write_cnt ++;
 		}
 

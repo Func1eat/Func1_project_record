@@ -345,6 +345,7 @@ typedef struct ru {
 	int pe_slc; // 在slc模式下的擦写次数
 	int pe_qlc; // 在qlc模式下的擦写次数
 	int mode;
+	int area_mode; // area_mode = 0 集中磨损区 = 1 交换区 = 2 低磨损区
 
 	double rand_rate; // rand_rate表示该ru中每个块的擦写次数上限等于标准的endurance * rand_rate
 	double wear_condition; // 当前的磨损状况，由两种模式下的擦写次数计算而来
@@ -353,7 +354,7 @@ typedef struct ru {
 	double read_hotness;
 	double write_hotness; 
 
-  double victim_pre;
+	double victim_pre;
 } ru; 					
 
 struct ruh {				
@@ -478,7 +479,7 @@ struct ssd {
 
 	// 当前读热区已满
 	int ra_full_flag;
-  int wa_full_flag;
+	int wa_full_flag;
 
 	// 统计当前周期的正常GC数量
 	int gc_to_slc_cnt;
@@ -580,6 +581,14 @@ struct ssd {
 	double status_remain_1_hotness;
 	double status_remain_2_hotness;
 	double status_remain_3_hotness;
+
+	double total_high_area_erase;
+	double total_change_area_erase;
+	double total_low_area_erase;
+
+	int high_area_ru_num;
+	int change_area_ru_num;
+	int low_area_ru_num;
 };
 
 void ssd_init(FemuCtrl *n);

@@ -840,21 +840,23 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
 
 	struct fdp_ru_mgmt *rum_slc = ssd->rums_slc, *rum_qlc = ssd->rums_qlc;
 	struct ru *ru;
-	double erase_slc_cnt = 0, erase_qlc_cnt = 0;
-    fprintf(fp_ec_info, "slc:\n");
+	// double erase_slc_cnt = 0, erase_qlc_cnt = 0;
+	fprintf(fp_ec_info, "slc:\n");
 	for (int j = 0; j < rum_slc->tt_rus; j ++) {
 		ru = &ssd->rus[get_slc_ru_id(ssd, j)];
-		erase_slc_cnt += ru->erase;
-        fprintf(fp_ec_info, "%lf\n", ru->erase);
+		// erase_slc_cnt += ru->erase;
+        fprintf(fp_ec_info, "%lf %d\n", ru->erase, ru->area_mode);
 	}
     fprintf(fp_ec_info, "qlc:\n");
 	for (int j = 0; j < rum_qlc->tt_rus; j ++) {
 		ru = &ssd->rus[get_qlc_ru_id(ssd, j)];
-		erase_qlc_cnt += ru->erase;
-        fprintf(fp_ec_info, "%lf\n", ru->erase);
+		// erase_qlc_cnt += ru->erase;
+        fprintf(fp_ec_info, "%lf %d\n", ru->erase, ru->area_mode);
 	}
-	double erase_ratio = erase_slc_cnt * 3.0 * ssd->sp.qlc_op/ (erase_qlc_cnt * 80.0 * ssd->sp.slc_op);
-	fprintf(fp_ec, "%lf %lf %lf\n", erase_slc_cnt, erase_qlc_cnt, erase_ratio);
+	fprintf(fp_ec_info, "total:%d %d %d %lf %lf %lf\n", ssd->high_area_ru_num, ssd->change_area_ru_num, ssd->low_area_ru_num, ssd->total_high_area_erase / ssd->high_area_ru_num, ssd->total_change_area_erase / ssd->change_area_ru_num, ssd->total_low_area_erase / ssd->low_area_ru_num);
+	fclose(fp_ec_info);
+	double erase_ratio = ssd->erase_slc * 3.0 * ssd->sp.qlc_op/ (ssd->erase_qlc * 80.0 * ssd->sp.slc_op);
+	fprintf(fp_ec, "%lf %lf %lf\n", ssd->erase_slc, ssd->erase_qlc, erase_ratio);
 	fclose(fp_ec);
 
 	// 打印rwtbl
@@ -870,7 +872,7 @@ static uint16_t nvme_smart_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
 	double wa = ((ssd->sp).pages_from_wl + (ssd->sp).pages_from_gc + (ssd->sp).pages_from_host + (ssd->sp).pages_from_migrate) * 1.0 / ((ssd->sp).pages_from_host);
 	double ra = ((ssd->sp).pages_from_host_read + (ssd->sp).read_retry + (ssd->sp).pages_from_gc) * 1.0 / ((ssd->sp).pages_from_host_read);
 	FILE *fp_wara = fopen(path2wara, "a+");
-	fprintf(fp_wara, "wa:%lf ra:%lf migrate_count:%"PRIu64" write_migrate_count:%"PRIu64" slc_wc:%"PRIu64" slc_rc:%"PRIu64" qlc_wc:%"PRIu64" qlc_rc:%"PRIu64"\n", wa, ra, ssd->migrate_count, ssd->write_migrate_count, ssd->rums_slc[0].write_cnt, ssd->rums_slc[0].read_cnt, ssd->rums_qlc[0].write_cnt, ssd->rums_qlc[0].read_cnt);
+	fprintf(fp_wara, "wa:%lf ra:%lf migrate_count:%"PRIu64" write_migrate_count:%"PRIu64" slc_wc:%"PRIu64" slc_rc:%"PRIu64" qlc_wc:%"PRIu64" qlc_rc:%"PRIu64" pages_from_wl:%"PRIu64"\n", wa, ra, ssd->migrate_count, ssd->write_migrate_count, ssd->rums_slc[0].write_cnt, ssd->rums_slc[0].read_cnt, ssd->rums_qlc[0].write_cnt, ssd->rums_qlc[0].read_cnt, ssd->sp.pages_from_wl);
 	fclose(fp_wara);
 
     /***Ziyang: end ***/

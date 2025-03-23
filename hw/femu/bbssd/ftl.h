@@ -443,8 +443,8 @@ struct ssd {
 	int page_size_thre;
 
 	// 两个区域当前的磨损程度，用于计算磨损速率
-	int pe_slc;
-	int pe_qlc;
+	double erase_slc;
+	double erase_qlc;
 
 	// 热度比例，用于改变写入两个区域的速率
 	double hot_ratio;

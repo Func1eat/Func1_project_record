@@ -1337,6 +1337,7 @@ static inline bool if_satisfy_migrate(struct ssd *ssd, struct ppa *ppa) {
 		int page_balance_type = (ppa->g.pg / 4) % 100 < ssd->sp.balance_ratio * 100 ? 0 : 1;
 		double read_page_lat = 0;
 		double retry = 0;
+		double retry_slc = 0;
 		if (ssd->age == 0) {
 			retry = 0;
 		} else if (ssd->age == 2 && page_type == 0){
@@ -1345,8 +1346,10 @@ static inline bool if_satisfy_migrate(struct ssd *ssd, struct ppa *ppa) {
 			retry = MID_READ_RETRY2;
 		} else if (ssd->age == 3 && page_type == 0){
 			retry = OLD_READ_RETRY1;
+			retry_slc = 2;
 		} else if (ssd->age == 3){
-			retry = MID_READ_RETRY2;
+			retry = OLD_READ_RETRY2;
+			retry_slc = 2;
 		} 
 		if (page_balance_type == 0) {
 			if (page_type == 0)
@@ -1360,13 +1363,13 @@ static inline bool if_satisfy_migrate(struct ssd *ssd, struct ppa *ppa) {
 		} 
 
 		// 被迁移的页热度
-		double cur_hotness = ssd->read_hotness[lpn] * (read_page_lat - SLC_R);
+		double cur_hotness = ssd->read_hotness[lpn] * (read_page_lat - SLC_R * retry_slc);
 		double hotless = 0;
 		struct ru *hotless_ru =  select_ra_victim_ru(ssd);
 		if (hotless_ru != NULL) {
 			hotless = hotless_ru->read_hotness;
 		}
-		double cur_slc_avg_hotness = hotless * 4.0 / ssd->sp.pgs_per_ru * (ssd->avg_qlc_read_lat - SLC_R);
+		double cur_slc_avg_hotness = hotless * 4.0 / ssd->sp.pgs_per_ru * (ssd->avg_qlc_read_lat - SLC_R * retry_slc);
 
 		if (ssd->read_hotness[lpn] >= 2 && cur_hotness >= cur_slc_avg_hotness + SLC_W)
 			return true;
@@ -1481,6 +1484,10 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
 			}
 		}
 
+		if (ssd->age == 3 && c == NAND_SLC_READ) {
+			operation_lat = NAND_SLC_READ_LAT * 2;
+			read_retry = 1;
+		}
 		spp->read_retry += read_retry;
         lun->next_lun_avail_time = nand_stime + operation_lat;
 
@@ -2118,7 +2125,18 @@ static int fdp_clean_one_block(struct ssd *ssd, struct ppa *ppa, uint16_t rgid, 
 							ssd->action_2_cnt ++;
 						}
 						ssd->cur_write_req_cnt ++;
-					} else if (ssd->sp.write_mode == 0 || ssd->sp.write_mode == 3) {
+					} else if (ssd->sp.write_mode == 5) {
+						if (ssd->write_hotness[cur_lpn] < ssd->write_hotness_thre) {
+							ssd->write_migrate_count ++;
+							ssd->action_3_cnt ++;
+							ssd->qlc_migrate_cnt ++;
+							fdp_gc_write_page(ssd, ppa, rgid, 2);
+						} else {
+							fdp_gc_write_page(ssd, ppa, rgid, ruhid);
+							ssd->action_2_cnt ++;
+						}
+						ssd->cur_write_req_cnt ++;
+					}else if (ssd->sp.write_mode == 0 || ssd->sp.write_mode == 3) {
 						// if (ssd->gc_cnt_before_update[cur_lpn] >= 1) {
 						// 	fdp_gc_write_page(ssd, ppa, rgid, 2);
 						// 	ssd->write_migrate_count ++;
@@ -2517,8 +2535,11 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 		lunp->gc_endtime = lunp->next_lun_avail_time;
 	}
 	
-	if (ssd->cur_write_req_cnt >= (10 * ssd->sp.pgs_per_ru / 4)  && ssd->sp.write_mode == 1) {
-		double c_before = ssd->action_1_cnt * SLC_W + ssd->action_2_cnt * (SLC_W + SLC_R) + ssd->action_3_cnt * (SLC_R + QLC_W);
+	if (ssd->cur_write_req_cnt >= (10 * ssd->sp.pgs_per_ru / 4)  && (ssd->sp.write_mode == 1 || ssd->sp.write_mode == 5)) {
+		double retry_slc = 0;
+		if (ssd->age == 3)
+			retry_slc = 2;		
+		double c_before = ssd->action_1_cnt * SLC_W + ssd->action_2_cnt * (SLC_W + SLC_R * retry_slc) + ssd->action_3_cnt * (SLC_R * retry_slc + QLC_W);
 		double c_after = ssd->action_1_cnt * QLC_W;
 		
 		double ratio = c_before == 0 ? 10 : c_after / c_before;
@@ -2544,16 +2565,16 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 				double b_before;
 				double b_after;
 				if (ssd->gc_cnt_before_update_thre[j] == 3) {
-					b_before = ssd->cnt_41[j] * (QLC_W - SLC_W - 3 * (SLC_W + SLC_R)) + ssd->cnt_45[j] * (0 - 4 * (SLC_W + SLC_R));
-					b_after = (ssd->cnt_41[j] + ssd->cnt_45[j]) * (0 - 3 * (SLC_W + SLC_R));
+					b_before = ssd->cnt_41[j] * (QLC_W - SLC_W - 3 * (SLC_W + SLC_R * retry_slc)) + ssd->cnt_45[j] * (0 - 4 * (SLC_W + SLC_R * retry_slc));
+					b_after = (ssd->cnt_41[j] + ssd->cnt_45[j]) * (0 - 3 * (SLC_W + SLC_R * retry_slc));
 				} else if (ssd->gc_cnt_before_update_thre[j] == 2) {
-					b_before = ssd->cnt_31[j] * (QLC_W - SLC_W - 2 * (SLC_W + SLC_R)) + ssd->cnt_34[j] * (0 - 3 * (SLC_W + SLC_R));
-					b_after = (ssd->cnt_31[j] + ssd->cnt_34[j]) * (0 - 2 * (SLC_W + SLC_R));
+					b_before = ssd->cnt_31[j] * (QLC_W - SLC_W - 2 * (SLC_W + SLC_R * retry_slc)) + ssd->cnt_34[j] * (0 - 3 * (SLC_W + SLC_R * retry_slc));
+					b_after = (ssd->cnt_31[j] + ssd->cnt_34[j]) * (0 - 2 * (SLC_W + SLC_R * retry_slc));
 				} else if (ssd->gc_cnt_before_update_thre[j] == 1) {
-					b_before = ssd->cnt_21[j] * (QLC_W - SLC_W - 1 * (SLC_W + SLC_R)) + ssd->cnt_23[j] * (0 - 2 * (SLC_W + SLC_R));
-					b_after = (ssd->cnt_21[j] + ssd->cnt_23[j]) * (0 - 1 * (SLC_W + SLC_R));
+					b_before = ssd->cnt_21[j] * (QLC_W - SLC_W - 1 * (SLC_W + SLC_R * retry_slc)) + ssd->cnt_23[j] * (0 - 2 * (SLC_W + SLC_R * retry_slc));
+					b_after = (ssd->cnt_21[j] + ssd->cnt_23[j]) * (0 - 1 * (SLC_W + SLC_R * retry_slc));
 				} else if (ssd->gc_cnt_before_update_thre[j] == 0) {
-					b_before = ssd->cnt_11[j] * (QLC_W - SLC_W) + ssd->cnt_12[j] * (0 - 1 * (SLC_W + SLC_R));
+					b_before = ssd->cnt_11[j] * (QLC_W - SLC_W) + ssd->cnt_12[j] * (0 - 1 * (SLC_W + SLC_R * retry_slc));
 					b_after = 0;
 				} else {
 					b_before = 0;
@@ -3171,7 +3192,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
         if (mapped_ppa(&ppa)) {
 			if (get_ru(ssd, &ppa)->mode == 0) {
 				ppa_map_flag = 1;
-				if (spp->write_mode == 1) {
+				if (spp->write_mode == 1 || spp->write_mode == 5) {
 					if (ssd->gc_cnt_before_update[lpn] == 0) {
 						ssd->cnt_11[ssd->write_hotness[lpn]] ++;
 					} else if (ssd->gc_cnt_before_update[lpn] == 1) {
@@ -3235,7 +3256,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 
 
 		// 基于动态变化的热度阈值
-		if (spp->write_mode == 1) {
+		if (spp->write_mode == 1 || spp->write_mode == 5) {
 			if (ppa_map_flag == 1) {
 				write_flag = 0;
 			}
@@ -3344,8 +3365,11 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 		}
 
 		// 修改数据准入阈值
-		if (ssd->cur_write_req_cnt >= (10 * ssd->sp.pgs_per_ru / 4)  && ssd->sp.write_mode == 1) {
-			double c_before = ssd->action_1_cnt * SLC_W + ssd->action_2_cnt * (SLC_W + SLC_R) + ssd->action_3_cnt * (SLC_R + QLC_W);
+		if (ssd->cur_write_req_cnt >= (10 * ssd->sp.pgs_per_ru / 4)  && (ssd->sp.write_mode == 1 || spp->write_mode == 5)) {
+			double retry_slc = 0;
+			if (ssd->age == 3)
+				retry_slc = 2;		
+			double c_before = ssd->action_1_cnt * SLC_W + ssd->action_2_cnt * (SLC_W + SLC_R * retry_slc) + ssd->action_3_cnt * (SLC_R * retry_slc + QLC_W);
 			double c_after = ssd->action_1_cnt * QLC_W;
 			
 			double ratio = c_before == 0 ? 10 : c_after / c_before;
@@ -3371,16 +3395,16 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 					double b_before;
 					double b_after;
 					if (ssd->gc_cnt_before_update_thre[j] == 3) {
-						b_before = ssd->cnt_41[j] * (QLC_W - SLC_W - 3 * (SLC_W + SLC_R)) + ssd->cnt_45[j] * (0 - 4 * (SLC_W + SLC_R));
-						b_after = (ssd->cnt_41[j] + ssd->cnt_45[j]) * (0 - 3 * (SLC_W + SLC_R));
+						b_before = ssd->cnt_41[j] * (QLC_W - SLC_W - 3 * (SLC_W + SLC_R * retry_slc)) + ssd->cnt_45[j] * (0 - 4 * (SLC_W + SLC_R * retry_slc));
+						b_after = (ssd->cnt_41[j] + ssd->cnt_45[j]) * (0 - 3 * (SLC_W + SLC_R * retry_slc));
 					} else if (ssd->gc_cnt_before_update_thre[j] == 2) {
-						b_before = ssd->cnt_31[j] * (QLC_W - SLC_W - 2 * (SLC_W + SLC_R)) + ssd->cnt_34[j] * (0 - 3 * (SLC_W + SLC_R));
-						b_after = (ssd->cnt_31[j] + ssd->cnt_34[j]) * (0 - 2 * (SLC_W + SLC_R));
+						b_before = ssd->cnt_31[j] * (QLC_W - SLC_W - 2 * (SLC_W + SLC_R * retry_slc)) + ssd->cnt_34[j] * (0 - 3 * (SLC_W + SLC_R * retry_slc));
+						b_after = (ssd->cnt_31[j] + ssd->cnt_34[j]) * (0 - 2 * (SLC_W + SLC_R * retry_slc));
 					} else if (ssd->gc_cnt_before_update_thre[j] == 1) {
-						b_before = ssd->cnt_21[j] * (QLC_W - SLC_W - 1 * (SLC_W + SLC_R)) + ssd->cnt_23[j] * (0 - 2 * (SLC_W + SLC_R));
-						b_after = (ssd->cnt_21[j] + ssd->cnt_23[j]) * (0 - 1 * (SLC_W + SLC_R));
+						b_before = ssd->cnt_21[j] * (QLC_W - SLC_W - 1 * (SLC_W + SLC_R * retry_slc)) + ssd->cnt_23[j] * (0 - 2 * (SLC_W + SLC_R * retry_slc));
+						b_after = (ssd->cnt_21[j] + ssd->cnt_23[j]) * (0 - 1 * (SLC_W + SLC_R * retry_slc));
 					} else if (ssd->gc_cnt_before_update_thre[j] == 0) {
-						b_before = ssd->cnt_11[j] * (QLC_W - SLC_W) + ssd->cnt_12[j] * (0 - 1 * (SLC_W + SLC_R));
+						b_before = ssd->cnt_11[j] * (QLC_W - SLC_W) + ssd->cnt_12[j] * (0 - 1 * (SLC_W + SLC_R * retry_slc));
 						b_after = 0;
 					} else {
 						b_before = 0;
@@ -3406,7 +3430,6 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 				}
 				ssd->cnt_window = 0;
 			}
-
 			ftl_log("write_hotness_thre:%d gc_cnt_before_update_thre:%d %d %d %d\n", ssd->write_hotness_thre, ssd->gc_cnt_before_update_thre[0], ssd->gc_cnt_before_update_thre[1], ssd->gc_cnt_before_update_thre[2], ssd->gc_cnt_before_update_thre[3]);
 
 			ssd->cnt_window ++;
@@ -3424,7 +3447,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 			ssd->rums_qlc[0].write_cnt ++;
 		else {
 			ssd->rums_slc[0].write_cnt ++;
-			if (spp->write_mode == 0 || spp->write_mode == 1)
+			if (spp->write_mode == 0 || spp->write_mode == 1 || spp->write_mode == 5)
 				ssd->slc_write_cnt ++;
 		}
 

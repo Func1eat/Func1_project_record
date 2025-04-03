@@ -41,16 +41,24 @@ enum {
     QLC_2_R = 4,
     QLC_3_R = 4,
     QLC_4_R = 4,
+	QLC_U_1_R = 1,
+    QLC_U_2_R = 2,
+    QLC_U_3_R = 6,
+    QLC_U_4_R = 6,
     QLC_W = 20,
+};
+
+enum {
     MID_READ_RETRY1 = 2,
     MID_READ_RETRY2 = 3,
     OLD_READ_RETRY1 = 5,
     OLD_READ_RETRY2 = 7,
-	  QLC_U_1_R = 1,
-    QLC_U_2_R = 2,
-    QLC_U_3_R = 6,
-    QLC_U_4_R = 6,
-	  MID_READ_U_RETRY = 7,
+	MID_READ_U_RETRY1 = 1,
+	MID_READ_U_RETRY2 = 1,
+    MID_READ_U_RETRY3 = 7,
+    OLD_READ_U_RETRY1 = 2,
+    OLD_READ_U_RETRY2 = 3,
+	OLD_READ_U_RETRY3 = 10,
 };
 
 enum {
@@ -350,8 +358,7 @@ typedef struct ru {
 	double wear_condition; // 当前的磨损状况，由两种模式下的擦写次数计算而来
 
 	// 统计该ru当前的热度
-	double read_hotness;
-	double write_hotness; 
+	double total_value;
 
   double victim_pre;
 } ru; 					
@@ -447,19 +454,8 @@ struct ssd {
 
 	// 热度比例，用于改变写入两个区域的速率
 	double hot_ratio;
-
-	double total_slc_wa_write_hotness;
-	double total_slc_wa_read_hotness;
-	int slc_valid_cnt;
-	double total_slc_ra_write_hotness;
-	double total_slc_ra_read_hotness;
 	
-	// int gc_total_cnt;
-	// int gc_valid_cnt;
-	// double gc_ratio;
-
-	// qlc区域平均读延迟
-	double avg_qlc_read_lat;
+	int slc_valid_cnt;
 
 	double v_gc;
 	double v_write;
@@ -471,14 +467,10 @@ struct ssd {
 	double slc_util;
 	double slc_gc_eff;
 	double qlc_gc_eff;
-	// double gc_func_left;
-	// double gc_func_right;
-	// int has_do_slc_gc;
-	// int has_do_qlc_gc;
 
 	// 当前读热区已满
 	int ra_full_flag;
-  int wa_full_flag;
+	int wa_full_flag;
 
 	// 统计当前周期的正常GC数量
 	int gc_to_slc_cnt;
@@ -490,6 +482,11 @@ struct ssd {
 	double action_2_cnt;
 	double action_3_cnt;
 	double action_4_cnt;
+
+  // double ob_action_1_cnt;
+	// double ob_action_2_cnt;
+	// double ob_action_3_cnt;
+	// double ob_action_4_cnt;
 
 	// 统计不同热度数据淘汰和更新的概率
 	double cnt_45[4];
@@ -514,32 +511,10 @@ struct ssd {
 	double status_14_cnt;
 	double status_04_cnt;
 
-	// double pre_status_0_cnt;
-	// double pre_status_00_cnt;
-	// double pre_status_01_cnt;
-	// double pre_status_12_cnt;
-	// double pre_status_10_cnt;
-	// double pre_status_23_cnt;
-	// double pre_status_20_cnt;
-	// double pre_status_34_cnt;
-	// double pre_status_30_cnt;
-	// double pre_status_4_cnt;
-	// double pre_status_24_cnt;
-	// double pre_status_14_cnt;
-	// double pre_status_04_cnt;
-
-	// uint64_t status_0_total_cnt;
-	// uint64_t status_1_total_cnt;
-	// uint64_t status_2_total_cnt;
-	// uint64_t status_3_total_cnt;
-	// uint64_t status_4_total_cnt;
-	// uint64_t status_5_total_cnt;
-	// double goodness_total;
-
 	int gc_cnt_before_update_thre[4];
   	int write_hotness_thre;
   	// 当前的窗口计数
-	int cnt_window;
+	int cnt_window[4];
 	// 记录历史goodness
 	double goodness[4];
 	// 记录这些阈值的间隔
@@ -575,11 +550,8 @@ struct ssd {
 	double status_update_1_cnt;
 	double status_update_2_cnt;
 	double status_update_3_cnt;
-	// warm分区的热度
-	double status_remain_0_hotness;
-	double status_remain_1_hotness;
-	double status_remain_2_hotness;
-	double status_remain_3_hotness;
+
+	int read_cnt[8];
 };
 
 void ssd_init(FemuCtrl *n);

@@ -422,6 +422,9 @@ struct ssd {
 	// 统计每个lpn的读写次数
 	int *lpnrtbl;
     int *lpnwtbl;
+
+  int hit_buffer_count;
+  int total_buffer_count;
 	
 	// 统计每个lpn的当前热度
 	double *read_hotness;
@@ -459,7 +462,9 @@ struct ssd {
 
 	double v_gc;
 	double v_write;
+  double v_qlc;
 	int slc_write_cnt;
+  int qlc_write_cnt;
   	int qlc_migrate_cnt;
 	int my_full_flag;
 

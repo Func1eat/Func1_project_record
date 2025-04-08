@@ -780,6 +780,7 @@ static Property femu_props[] = {
     DEFINE_PROP_INT32("read_migration", FemuCtrl, bb_params.read_migration, 1),
     DEFINE_PROP_INT32("write_mode", FemuCtrl, bb_params.write_mode, 1),
     DEFINE_PROP_INT32("wl_mode", FemuCtrl, bb_params.wl_mode, 1),
+    DEFINE_PROP_INT32("enable_cap_loss", FemuCtrl, bb_params.enable_cap_loss, 1),
     DEFINE_PROP_INT32("ru_mode", FemuCtrl, bb_params.ru_mode, 1),
     DEFINE_PROP_INT32("slc_op", FemuCtrl, bb_params.slc_op, 25),
     DEFINE_PROP_INT32("qlc_op", FemuCtrl, bb_params.qlc_op, 75),

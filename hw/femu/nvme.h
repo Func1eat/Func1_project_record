@@ -1320,6 +1320,7 @@ typedef struct BbCtrlParams {
     int dynamic_tm_flag;
     int dynamic_tw_flag;
     int wl_mode;
+    int enable_cap_loss;
     int slc_op;
     int qlc_op;
 

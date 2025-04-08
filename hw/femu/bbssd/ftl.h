@@ -230,8 +230,8 @@ struct ssdparams {
     int tt_luns;      /* total # of LUNs in the SSD */
 
     // 磨损相关
-    int endurance_slc;
-	int endurance_qlc;
+    double endurance_slc;
+	double endurance_qlc;
     double slc_alpha;
 
     double op;
@@ -275,6 +275,9 @@ struct ssdparams {
 
     // 磨损均衡方式
     int wl_mode;
+
+	// 容许损失的超级块个数
+	int enable_cap_loss;
     
 	// 读延迟阈值，高于此阈值的数据会被迁移到slc
 	uint64_t read_latency_threshold;
@@ -423,6 +426,9 @@ struct ssd {
 	// 统计每个lpn的读写次数
 	int *lpnrtbl;
     int *lpnwtbl;
+
+  int hit_buffer_count;
+  int total_buffer_count;
 	
 	// 统计每个lpn的当前热度
 	double *read_hotness;
@@ -460,7 +466,9 @@ struct ssd {
 
 	double v_gc;
 	double v_write;
+  double v_qlc;
 	int slc_write_cnt;
+  int qlc_write_cnt;
   	int qlc_migrate_cnt;
 	int my_full_flag;
 
@@ -561,6 +569,10 @@ struct ssd {
 	int high_area_ru_num;
 	int change_area_ru_num;
 	int low_area_ru_num;
+
+	// 统计坏块和高耐磨块数量
+	int exceed_qlc_block_num;
+	int exceed_slc_block_num;
 };
 
 void ssd_init(FemuCtrl *n);

@@ -411,7 +411,8 @@ struct ssd {
 	int *gc_cnt;				/* for two-level isolation gc */		
 	int fdp_enabled;
 
-	int cv_moderate;
+	int wl_stage;
+  int page_allocate_mode;
 
 	// 存放所有ru的rand_rate,方便排序
 	double *rand_rate;
@@ -532,6 +533,8 @@ struct ssd {
 	double cur_goodness;
 	double cur_goodness1;
 
+  int wfc_flag;
+
 	// 记录当前统计读写频率的窗口
 	int wr_ratio_cnt_window;
 	int write_req_cnt;
@@ -564,11 +567,9 @@ struct ssd {
 
 	double total_high_area_erase;
 	double total_change_area_erase;
-	double total_low_area_erase;
 
 	int high_area_ru_num;
 	int change_area_ru_num;
-	int low_area_ru_num;
 
 	// 统计坏块和高耐磨块数量
 	int exceed_qlc_block_num;

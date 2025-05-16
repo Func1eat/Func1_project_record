@@ -549,8 +549,7 @@ static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 
 		// 初始化三区大小
 		ssd->high_area_ru_num = 0;
-		ssd->low_area_ru_num = 0;
-		ssd->change_area_ru_num = ssd->sp.tt_rus - ssd->high_area_ru_num - ssd->low_area_ru_num;
+		ssd->change_area_ru_num = ssd->sp.tt_rus - ssd->high_area_ru_num;
 
 		// 生成所有ru的信息
 		for (int j = 0; j < spp->tt_rus; j++) {
@@ -614,12 +613,7 @@ static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 		for (int j = 0; j < rum_qlc->tt_rus; j ++) {
 			ru = &ssd->rus[get_qlc_ru_id(ssd, j)];
 			ru->mode = 1;
-			// 初始化所在区域
-			if (j < ssd->rums_qlc->tt_rus - ssd->low_area_ru_num) {
-				ru->area_mode = 1;
-			} else {
-				ru->area_mode = 2;
-			}
+			ru->area_mode = 1;
 			QTAILQ_INSERT_TAIL(&rum_qlc->free_ru_list, ru, entry);
 			rum_qlc->free_ru_cnt++;
 		}
@@ -654,7 +648,8 @@ static int get_next_free_ruid(struct ssd *ssd, struct fdp_ru_mgmt *rum, int ruhi
 	
 	struct ru *ru_tmp = retru;
 	double hottest = retru->erase;
-	if (ssd->sp.wl_mode == 0 && ssd->sp.wl_mode == 1) {
+	// 除wl_mode = 3外均使用动态磨损均衡
+	if (ssd->sp.wl_mode == 0 || ssd->sp.wl_mode == 1 || ssd->sp.wl_mode == 2) {
 		if (ssd->sp.enable_dwl) {
 			// 动态磨损均衡，优先选择最年轻的RU进行写入
 			for (int i = 1; i < rum->free_ru_cnt; i++) {
@@ -666,90 +661,79 @@ static int get_next_free_ruid(struct ssd *ssd, struct fdp_ru_mgmt *rum, int ruhi
 			}
 		}
 	}
-	if (ssd->sp.wl_mode == 2) {
-		if (ruhid == 3) {
-			if (ssd->cv_moderate == 1) {
-				for (int i = 1; i < rum->free_ru_cnt; i++) {
-					retru = QTAILQ_NEXT(retru, entry);
-					if (retru->erase > hottest) {
-						hottest = retru->erase;
-						ru_tmp = retru;
-					}
-				}
-			} // youngest block first
-			else {
-				for (int i = 1; i < rum->free_ru_cnt; i++) {
-					retru = QTAILQ_NEXT(retru, entry);
-					if (retru->erase < hottest) {
-						hottest = retru->erase;
-						ru_tmp = retru;
-					}
-				}
-			}
-		} else if (ruhid == 2) {
-			// old first
-			if (ssd->cv_moderate == 0) {
-				for (int i = 1; i < rum->free_ru_cnt; i++) {
-					retru = QTAILQ_NEXT(retru, entry);
-					if (retru->erase > hottest) {
-						hottest = retru->erase;
-						ru_tmp = retru;
-					}
-				}
-			} // youngest block first
-			else {
-				for (int i = 1; i < rum->free_ru_cnt; i++) {
-					retru = QTAILQ_NEXT(retru, entry);
-					if (retru->erase < hottest) {
-						hottest = retru->erase;
-						ru_tmp = retru;
-					}
-				}
-			}
-		} else {
-			struct ru *high_erase_ru = retru->area_mode == 0 ? retru : NULL;
-			struct ru *cur_ru = retru;
-			for (int i = 1; i < rum->free_ru_cnt; i++) {
-				cur_ru = QTAILQ_NEXT(cur_ru, entry);
-				if (high_erase_ru == NULL && cur_ru->area_mode == 0) {
-					high_erase_ru = cur_ru;
-					hottest = cur_ru->erase;
-				} else if (cur_ru->area_mode == 0 && cur_ru->erase < hottest) {
-					hottest = cur_ru->erase;
-					high_erase_ru = cur_ru;
-				}
-			}
 
-			if (high_erase_ru)
-				ru_tmp = high_erase_ru;
-			else {
-				for (int i = 1; i < rum->free_ru_cnt; i++) {
-					retru = QTAILQ_NEXT(retru, entry);
-					if (retru->erase > hottest) {
-						hottest = retru->erase;
-						ru_tmp = retru;
-					}
+	// 可转换区第一阶段选最老的，其余的都是选最年轻的 TODO
+	if (ssd->sp.wl_mode == 3) {
+
+		// 判断优先取哪个
+		double erase_ratio2 = ssd->total_high_area_erase * (ssd->rums_slc[0].tt_rus - ssd->high_area_ru_num) * ssd->sp.endurance_qlc / (ssd->high_area_ru_num * (ssd->erase_slc - ssd->total_high_area_erase) * ssd->sp.endurance_slc);
+		if (erase_ratio2 > 1)
+			ssd->page_allocate_mode = 1;
+		else
+			// 有限写入永久slc块
+			ssd->page_allocate_mode = 0;
+
+		struct ru *victim_mode0_ru = NULL;
+		double victim_mode0_ru_erase = 10000;
+		struct ru *victim_mode1_ru = NULL;
+		double victim_mode1_ru_erase;
+		if (ssd->wl_stage == 0)	{
+			victim_mode1_ru_erase = -1;
+		} else {
+			victim_mode1_ru_erase = 10000;
+		}
+
+		// 待选块为永久SLC块
+		if (ru_tmp->area_mode == 0) {
+			victim_mode0_ru = ru_tmp;
+			victim_mode0_ru_erase = ru_tmp->erase;
+		} else {
+			victim_mode0_ru = ru_tmp;
+			victim_mode1_ru_erase = ru_tmp->erase;
+		}
+
+
+		for (int i = 1; i < rum->free_ru_cnt; i++) {
+			retru = QTAILQ_NEXT(retru, entry);
+			// 最年轻的永久SLC块
+			if (retru->area_mode == 0 && retru->erase < victim_mode0_ru_erase) {
+				victim_mode0_ru_erase = retru->erase;
+				victim_mode0_ru = retru;
+			}
+			if(ssd->wl_stage == 0) {
+				if (retru->area_mode == 1 && retru->erase > victim_mode1_ru_erase) {
+					victim_mode1_ru_erase = retru->erase;
+					victim_mode1_ru = retru;
+				}
+			} else {
+				if (retru->area_mode == 1 && retru->erase < victim_mode1_ru_erase) {
+					victim_mode1_ru_erase = retru->erase;
+					victim_mode1_ru = retru;
 				}
 			}
 		}
+
+		if (ssd->page_allocate_mode == 0) {
+			if (victim_mode0_ru)
+				ru_tmp = victim_mode0_ru;
+			else 
+				ru_tmp = victim_mode1_ru;
+		} else {
+			if (victim_mode1_ru)
+				ru_tmp = victim_mode1_ru;
+			else 
+				ru_tmp = victim_mode0_ru;
+		}
 	}
+
 	if (ru_tmp->mode == 0 && ruhid == 0) {
 		rum->write_ru_cnt ++;
 		ru_tmp->ruhid = 0;
-	}
-	else if (ru_tmp->mode == 0 && ruhid == 1) {
+	} else if (ru_tmp->mode == 0 && ruhid == 1) {
 		rum->read_ru_cnt ++;
 		ru_tmp->ruhid = 1;
-	}
-	else if (ru_tmp->mode == 1) {
+	} else if (ru_tmp->mode == 1) {
 		ru_tmp->ruhid = ruhid;
-		if (ruhid == 3 && ssd->sp.wl_mode == 2) {
-			ru_tmp->area_mode = 2;
-			ssd->low_area_ru_num ++;
-			ssd->change_area_ru_num --;
-			ssd->total_change_area_erase -= ru_tmp->erase;
-			ssd->total_low_area_erase += ru_tmp->erase;
-		}
 	}
 	QTAILQ_REMOVE(&rum->free_ru_list, ru_tmp, entry);
 	rum->free_ru_cnt--;
@@ -1524,6 +1508,9 @@ static uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa, struct
 		page_age = 2;
 	} else
 		page_age = 3;
+
+	// TODO
+	page_age = 0;
 	
 	if (c == NAND_SLC_READ)
 		operation_lat = NAND_SLC_READ_LAT;
@@ -2140,18 +2127,41 @@ static struct ru *select_wa_victim_ru(struct ssd *ssd) {
 	struct fdp_ru_mgmt *rum = &ssd->rums_slc[0];
 	struct ru *wa_victim_ru = NULL;
 	struct ru *wa_full_ru = NULL;
-
-	// 在victim list中寻找无效页最多的最低的
-	int max_invalid_page = 0;
-	for (int j = 0; j < rum->victim_ru_cnt; j++) {
-		struct ru * tmp_ru = rum->victim_ru_pq->d[j + 1]; 
-		if (tmp_ru->ruhid == 0) {
-			if (tmp_ru->ipc > max_invalid_page) {
-				max_invalid_page = tmp_ru->ipc;
-				wa_victim_ru = tmp_ru;
+	
+	if (ssd->sp.wl_mode == 3) {
+		// 在victim list中寻找无效页最多的最低的
+		double max_score = 0;
+		for (int j = 0; j < rum->victim_ru_cnt; j++) {
+			struct ru * tmp_ru = rum->victim_ru_pq->d[j + 1]; 
+			double victim_score = 0;
+			if (tmp_ru->area_mode == 0)
+				victim_score = tmp_ru->ipc * 1.0 / ssd->sp.pgs_per_ru;
+			else if (ssd->wl_stage == 0)
+				victim_score = 0.8 * tmp_ru->ipc / ssd->sp.pgs_per_ru + 0.2 * tmp_ru->erase / ssd->sp.endurance_qlc;
+			else 
+				victim_score = 0.8 * tmp_ru->ipc / ssd->sp.pgs_per_ru + 0.2 * (ssd->sp.endurance_qlc - tmp_ru->erase) / ssd->sp.endurance_qlc;
+			if (tmp_ru->ruhid == 0) {
+				if (victim_score > max_score) {
+					max_score = victim_score;
+					wa_victim_ru = tmp_ru;
+				}
+			}
+		}
+	} else {
+		double max_score = 0;
+		for (int j = 0; j < rum->victim_ru_cnt; j++) {
+			struct ru * tmp_ru = rum->victim_ru_pq->d[j + 1]; 
+			double victim_score = 0;
+			victim_score = tmp_ru->ipc;
+			if (tmp_ru->ruhid == 0) {
+				if (victim_score > max_score) {
+					max_score = victim_score;
+					wa_victim_ru = tmp_ru;
+				}
 			}
 		}
 	}
+	
 	wa_full_ru = QTAILQ_FIRST(&rum->full_ru_list);
 	if (wa_victim_ru)
 		return wa_victim_ru;
@@ -2179,8 +2189,8 @@ static struct ru *select_victim_ru_slc(struct ssd *ssd, bool force, int rgid)
     }
 
 	// 判断是否要扩大读区
-	double value_thre_low = 7500;
-	double value_thre_high = 30000;
+	double value_thre_low = 5000;
+	double value_thre_high = 20000;
 	if (victim_ra_ru != NULL)
 		ftl_log("victim_ra_ru: %d, read_hotness: %lf\n", victim_ra_ru->id, victim_ra_ru->total_value);
 	if (ssd->sp.dynamic_ra_flag && ssd->ra_full_flag == 1 && ssd->sp.wa_max_cnt > 10 && victim_ra_ru != NULL && (victim_ra_ru->total_value > value_thre_high || ssd->rums_slc[0].write_ru_cnt < ssd->sp.wa_max_cnt - 1)) {
@@ -2513,9 +2523,9 @@ static void output_info_log(struct ssd *ssd) {
 		// erase_qlc_cnt += ru->erase;
         fprintf(fp_ec_info, "%lf %d\n", ru->erase, ru->area_mode);
 	}
-	fprintf(fp_ec_info, "total:%d %d %d %lf %lf %lf\n", ssd->high_area_ru_num, ssd->change_area_ru_num, ssd->low_area_ru_num, ssd->total_high_area_erase / ssd->high_area_ru_num, ssd->total_change_area_erase / ssd->change_area_ru_num, ssd->total_low_area_erase / ssd->low_area_ru_num);
+	fprintf(fp_ec_info, "total:%d %d %lf %lf\n", ssd->high_area_ru_num, ssd->change_area_ru_num, ssd->total_high_area_erase / ssd->high_area_ru_num, ssd->total_change_area_erase / ssd->change_area_ru_num);
 	fclose(fp_ec_info);
-	double erase_ratio = ssd->erase_slc * 3.0 * ssd->sp.qlc_op/ (ssd->erase_qlc * 80.0 * ssd->sp.slc_op);
+	double erase_ratio = ssd->erase_slc * ssd->sp.endurance_qlc * ssd->sp.qlc_op/ (ssd->erase_qlc * ssd->sp.endurance_slc * ssd->sp.slc_op);
 	fprintf(fp_ec, "%lf %lf %lf\n", ssd->erase_slc, ssd->erase_qlc, erase_ratio);
 	fclose(fp_ec);
 
@@ -2534,7 +2544,7 @@ static void output_info_log(struct ssd *ssd) {
 	double wa = (wl_divide_gap + (ssd->sp).pages_from_gc + (ssd->sp).pages_from_host + (ssd->sp).pages_from_migrate) * 1.0 / ((ssd->sp).pages_from_host);
 	fprintf(fp_wara, "pages_from_wl:%lf pages_from_gc:%"PRIu64" pages_from_host:%"PRIu64" pages_from_migrate:%"PRIu64"\n", wl_divide_gap, (ssd->sp).pages_from_gc, (ssd->sp).pages_from_host, (ssd->sp).pages_from_migrate);
 	double ra = ((ssd->sp).pages_from_host_read + (ssd->sp).read_retry + (ssd->sp).pages_from_gc) * 1.0 / ((ssd->sp).pages_from_host_read);
-	fprintf(fp_wara, "wa:%lf ra:%lf migrate_count:%"PRIu64" write_migrate_count:%"PRIu64" slc_wc:%"PRIu64" qlc_wc:%"PRIu64" read_cnt:%d %d %d %d %d %d %d %d erase:%d %d %d %lf %lf %lf hit:%d %d\n", wa, ra, ssd->migrate_count, ssd->write_migrate_count, ssd->rums_slc[0].write_cnt, ssd->rums_qlc[0].write_cnt, ssd->read_cnt[0], ssd->read_cnt[1], ssd->read_cnt[2], ssd->read_cnt[3], ssd->read_cnt[4], ssd->read_cnt[5], ssd->read_cnt[6],ssd->read_cnt[7], ssd->high_area_ru_num, ssd->change_area_ru_num, ssd->low_area_ru_num, ssd->total_high_area_erase / ssd->high_area_ru_num, ssd->total_change_area_erase / ssd->change_area_ru_num, ssd->total_low_area_erase / ssd->low_area_ru_num, ssd->total_buffer_count, ssd->hit_buffer_count);
+	fprintf(fp_wara, "wa:%lf ra:%lf migrate_count:%"PRIu64" write_migrate_count:%"PRIu64" slc_wc:%"PRIu64" qlc_wc:%"PRIu64" read_cnt:%d %d %d %d %d %d %d %d erase:%d %d %lf %lf hit:%d %d\n", wa, ra, ssd->migrate_count, ssd->write_migrate_count, ssd->rums_slc[0].write_cnt, ssd->rums_qlc[0].write_cnt, ssd->read_cnt[0], ssd->read_cnt[1], ssd->read_cnt[2], ssd->read_cnt[3], ssd->read_cnt[4], ssd->read_cnt[5], ssd->read_cnt[6],ssd->read_cnt[7], ssd->high_area_ru_num, ssd->change_area_ru_num, ssd->total_high_area_erase / ssd->high_area_ru_num, ssd->total_change_area_erase / ssd->change_area_ru_num, ssd->total_buffer_count, ssd->hit_buffer_count);
 	fclose(fp_wara);
 	return;
 }
@@ -2681,7 +2691,8 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 	} else
 		page_age = 3;
 
-	if (ssd->cur_write_req_cnt >= (10 * ssd->sp.pgs_per_ru / 4)  && (ssd->sp.write_mode == 1 || ssd->sp.write_mode == 5) && ssd->sp.dynamic_tw_flag) {
+	double erase_ratio = ssd->erase_slc * ssd->sp.endurance_qlc * ssd->sp.qlc_op / (ssd->erase_qlc * ssd->sp.endurance_slc * ssd->sp.slc_op);
+	if (ssd->cur_write_req_cnt >= (10 * ssd->sp.pgs_per_ru / 4)  && (ssd->sp.write_mode == 1 || ssd->sp.write_mode == 5)) {
 		double retry_slc = 1;
 		if (page_age == 3)
 			retry_slc = 2;		
@@ -2693,19 +2704,31 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 		double low_thre = 3.5;
 		double high_thre = 5.5;
 
-		// 减少阈值
-		if (ratio < low_thre) {
-			if (ssd->write_hotness_thre != 1) {
-				ssd->write_hotness_thre = ssd->write_hotness_thre + 1;
-				for (int j = 0;	j < 4; j ++)
-					ssd->cnt_window[j] = 0;
+		if (erase_ratio >= 0.9 && erase_ratio <= 1.1)
+			ssd->wfc_flag = 0;
+
+		if (ssd->wfc_flag == 0) {
+			if (ratio < low_thre) {
+				if (ssd->write_hotness_thre != 1) {
+					ssd->write_hotness_thre = ssd->write_hotness_thre + 1;
+					for (int j = 0;	j < 4; j ++)
+						ssd->cnt_window[j] = 0;
+				}
+			} else if (ratio > high_thre) {
+				if (ssd->write_hotness_thre != 0) {
+					ssd->write_hotness_thre = ssd->write_hotness_thre - 1;
+					for (int j = 0;	j < 4; j ++)
+						ssd->cnt_window[j] = 0;
+				}
 			}
-		} else if (ratio > high_thre) {
-			if (ssd->write_hotness_thre != 0) {
-				ssd->write_hotness_thre = ssd->write_hotness_thre - 1;
-				for (int j = 0;	j < 4; j ++)
-					ssd->cnt_window[j] = 0;
-			}
+		}
+
+		if (ssd->sp.wl_mode == 2 && erase_ratio > 1.1) {
+			ssd->write_hotness_thre = ssd->write_hotness_thre >= 4 ? 4 : ssd->write_hotness_thre + 1;
+			ssd->wfc_flag = 1;
+		} else if (ssd->sp.wl_mode == 2 && erase_ratio < 0.9) {
+			ssd->write_hotness_thre = ssd->write_hotness_thre <= 0 ? 0 : ssd->write_hotness_thre - 1;
+			ssd->wfc_flag = 2;
 		}
 
 		if (ssd->sp.dynamic_tm_flag == 1) {
@@ -2821,62 +2844,50 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 	victim_ru->erase = spp->slc_alpha * victim_ru->pe_slc + victim_ru->pe_qlc;
 	if (victim_ru->area_mode == 0) 
 		ssd->total_high_area_erase = ssd->total_high_area_erase - pre_erase + victim_ru->erase;
-	else if (victim_ru->area_mode == 1)
+	else
 		ssd->total_change_area_erase = ssd->total_change_area_erase - pre_erase + victim_ru->erase;
-	else if (victim_ru->area_mode == 2)
-		ssd->total_low_area_erase = ssd->total_low_area_erase - pre_erase + victim_ru->erase;
 	
 	if (victim_ru->erase > ssd->sp.endurance_qlc && victim_ru->area_mode != 0) {
 		ssd->exceed_qlc_block_num ++;
 		ftl_log("Ru %d %lfbecomes forever slc!\n", victim_ru->id, victim_ru->erase);
-		// 将该块的信息与SLC区域中信息交换以模拟该块被放置在SLC区域
-		int min_index = -1;
-		int min_value = 100000;
-		for (int i = 0; i < ssd->rums_slc[0].tt_rus; i++) {
-			int index = get_slc_ru_id(ssd, i);
-			if (ssd->rus[index].area_mode == 1 && ssd->rus[index].erase < min_value) {
-				min_index = index;
-				min_value = ssd->rus[index].erase;
-			}
-		}
-		double victim_erase = victim_ru->erase;
-		int victim_peslc = victim_ru->pe_slc;
-		int victim_peqlc = victim_ru->pe_qlc;
-		if (min_index != -1) {
-			victim_ru->erase = ssd->rus[min_index].erase;
-			victim_ru->pe_slc = ssd->rus[min_index].pe_slc;
-			victim_ru->pe_qlc = ssd->rus[min_index].pe_qlc;
+		// // 将该块的信息与SLC区域中信息交换以模拟该块被放置在SLC区域
+		// int min_index = -1;
+		// int min_value = 100000;
+		// for (int i = 0; i < ssd->rums_slc[0].tt_rus; i++) {
+		// 	int index = get_slc_ru_id(ssd, i);
+		// 	if (ssd->rus[index].area_mode == 1 && ssd->rus[index].erase < min_value) {
+		// 		min_index = index;
+		// 		min_value = ssd->rus[index].erase;
+		// 	}
+		// }
+		// double victim_erase = victim_ru->erase;
+		// int victim_peslc = victim_ru->pe_slc;
+		// int victim_peqlc = victim_ru->pe_qlc;
+		// if (min_index != -1) {
+		// 	victim_ru->erase = ssd->rus[min_index].erase;
+		// 	victim_ru->pe_slc = ssd->rus[min_index].pe_slc;
+		// 	victim_ru->pe_qlc = ssd->rus[min_index].pe_qlc;
 
-			ssd->rus[min_index].area_mode = 0;
-			ssd->rus[min_index].pe_slc = victim_peslc;
-			ssd->rus[min_index].pe_qlc = victim_peqlc;
-			ssd->rus[min_index].erase = victim_erase;
-		}
+		// 	ssd->rus[min_index].area_mode = 0;
+		// 	ssd->rus[min_index].pe_slc = victim_peslc;
+		// 	ssd->rus[min_index].pe_qlc = victim_peqlc;
+		// 	ssd->rus[min_index].erase = victim_erase;
+		// }
 
 		ssd->high_area_ru_num ++;
-		if (victim_ru->area_mode == 1) {
-			ssd->change_area_ru_num --;
-			ssd->total_change_area_erase -= victim_erase;
+		ssd->change_area_ru_num --;
+		ssd->total_change_area_erase -= victim_ru->erase;
+
+		// if (min_index != 1)
+		// 	victim_ru->area_mode = 1;
+		// else
+		// 	victim_ru->area_mode = 0;
+		ssd->total_high_area_erase += victim_ru->erase;
+		victim_ru->area_mode = 0;
+		if (ssd->exceed_qlc_block_num >= 0.8 * (double)ssd->rums_slc[0].tt_rus) {
+			ftl_log("wl_stage become 1\n");
+			ssd->wl_stage = 1;
 		}
-		else if (victim_ru->area_mode == 2) {
-			ssd->low_area_ru_num --;
-			ssd->total_low_area_erase -= victim_erase;
-		}
-		if (min_index != 1)
-			victim_ru->area_mode = 1;
-		else
-			victim_ru->area_mode = 0;
-		ssd->total_high_area_erase += victim_erase;
-	}
-	
-	if (ssd->sp.write_mode == 5) {
-		double erase_ratio = ssd->erase_slc * 3.0 * ssd->sp.qlc_op / (ssd->erase_qlc * 80.0 * ssd->sp.slc_op);
-		if (erase_ratio < 0.9) {
-			ssd->write_hotness_thre = ssd->write_hotness_thre == 0 ? 0 :ssd->write_hotness_thre - 1;
-		}	
-		else if (erase_ratio > 1.1) {
-			ssd->write_hotness_thre = ssd->write_hotness_thre == 3 ? 3 :ssd->write_hotness_thre + 1;
-		}	
 	}
 
 	victim_ru->total_value = 0;
@@ -2914,14 +2925,14 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 		ftl_log("Ru %d becomes bad!\n", victim_ru->id);
 	} 
 	double cap_loss = 3.0 * ssd->exceed_qlc_block_num / 4 + ssd->exceed_slc_block_num;
-	if ((ssd->sp.wl_mode == 0 && cap_loss >= 32) || (ssd->sp.wl_mode != 0 && cap_loss >= ssd->sp.enable_cap_loss)){
+	if (cap_loss >= ssd->sp.enable_cap_loss){
 		output_info_log(ssd);
 		ftl_err("SSD reaches its end of the life!\n");
 		abort();
 	} else {
 		// 静态磨损均衡，把最低磨损的ru数据迁移到当前已被gc的ru中，然后低磨损ru插入free_ru_list
 		// SLC区域和QLC区域单独执行静态磨损均衡
-		if (ssd->sp.enable_swl == 1 && mode == 1) {
+		if (ssd->sp.enable_swl == 1 && (ssd->sp.wl_mode == 0 || ssd->sp.wl_mode == 1 || ssd->sp.wl_mode == 2)) {
 			int youngest_ru_id = -1;
 			double youngest_ru_erase = 1000000;
 			double erase_sum = 0; // 磨损总次数
@@ -2941,14 +2952,14 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 					erase_sum += cur_ru->erase;
 				}
 				// 找到磨损次数最少的ru
-				if ((cur_ru->erase < youngest_ru_erase) && cur_ru->area_mode == 1) {
+				if (cur_ru->erase < youngest_ru_erase) {
 					youngest_ru_id = cur_ru->id;
 					youngest_ru_erase = cur_ru->erase;
 				}
 			}
 
-			if (youngest_ru_id != -1 && youngest_ru_id != victim_ru->id && victim_ru->area_mode == 1) { 
-				double threshold = erase_sum / wl_rus / 2 + endurance / 3; // 交换阈值（热ru磨损次数大于平均磨损次数+...）
+			if (youngest_ru_id != -1 && youngest_ru_id != victim_ru->id) { 
+				double threshold = erase_sum / wl_rus / 2 + endurance / 2; // 交换阈值（热ru磨损次数大于平均磨损次数+...）
 				if (victim_ru->erase > threshold) {
 					struct nand_block *block_cold = NULL;
 					int counter = 0;
@@ -3021,12 +3032,13 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 						}
 					}
 					if (mode == 0) {
-						ssd->rus[youngest_ru_id].pe_slc += spp->gap;
-						ssd->erase_slc += spp->slc_alpha * spp->gap;
+						ssd->rus[youngest_ru_id].pe_slc += 1;
+						ssd->erase_slc += spp->slc_alpha;
 					} else {
-						ssd->rus[youngest_ru_id].pe_qlc += spp->gap;
-						ssd->erase_qlc += spp->gap;
+						ssd->rus[youngest_ru_id].pe_qlc += 1;
+						ssd->erase_qlc += 1;
 					}
+					
 					ssd->total_change_area_erase -= ssd->rus[youngest_ru_id].erase;
 					youngest_ru_erase = ssd->rus[youngest_ru_id].pe_slc * spp->slc_alpha + ssd->rus[youngest_ru_id].pe_qlc;
 					ssd->total_change_area_erase += youngest_ru_erase;
@@ -3034,7 +3046,7 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 					int youngest_ru_qlc = ssd->rus[youngest_ru_id].pe_qlc;
 
 
-					ftl_log("WL complete between ru %d (ec = %lf) and ru %d (ec = %lf)\n", victim_ru->id, victim_ru->erase, youngest_ru_id, youngest_ru_erase);
+					ftl_log("static WL complete between ru %d (ec = %lf) and ru %d (ec = %lf)\n", victim_ru->id, victim_ru->erase, youngest_ru_id, youngest_ru_erase);
 					// 只是模拟了时延，数据实质上没有交换，后续冷ru上的数据读还是会定位到冷ru上来，因此交换erase_cnt信息
 
 					ssd->rus[youngest_ru_id].erase = victim_ru->erase;
@@ -3047,11 +3059,9 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 			}
 		}
 
-		// wl_mode = 2 表明执行两个区域全局的静态磨损均衡，带上块的动态转化
 		// 受害块得能参与动态转化
 		// 当前SLC区域磨损程度过高时执行全局磨损均衡
-		double erase_ratio = ssd->erase_slc * 3.0 * ssd->sp.qlc_op / (ssd->erase_qlc * 80.0 * ssd->sp.slc_op);
-		if (((ssd->sp.wl_mode != 2  && victim_ru->erase < spp->endurance_qlc && victim_ru->mode == 0) || (ssd->sp.wl_mode == 2 && victim_ru->erase < spp->endurance_qlc && victim_ru->mode == 0 && victim_ru->area_mode == 1 && erase_ratio > 1)) && ssd->sp.wl_mode != 1){
+		if ((ssd->sp.wl_mode == 0  && victim_ru->erase < spp->endurance_qlc && victim_ru->mode == 0) || (ssd->sp.wl_mode == 3 && victim_ru->erase < spp->endurance_qlc && victim_ru->mode == 0 && erase_ratio > 1)){
 			int youngest_ru_id = -1;
 			double youngest_ru_erase = 1000000;
 			double erase_sum = 0; // 磨损总次数
@@ -3067,7 +3077,7 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 					erase_sum += cur_ru->erase;
 				}
 				// 找到转换区内磨损最小的ru
-				if ((cur_ru->erase < youngest_ru_erase && cur_ru->mode == 1 && cur_ru->area_mode == 1)) {
+				if (cur_ru->erase < youngest_ru_erase && cur_ru->mode == 1) {
 					youngest_ru_id = cur_ru->id;
 					youngest_ru_erase = cur_ru->erase;
 				}
@@ -3153,7 +3163,7 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 					victim_ru->pe_qlc = youngest_ru_peqlc;
 					ssd->erase_slc += youngest_ru_erase;
 					ssd->erase_qlc -= youngest_ru_erase;
-					erase_ratio = ssd->erase_slc * 3.0 * ssd->sp.qlc_op / (ssd->erase_qlc * 80.0 * ssd->sp.slc_op);
+					erase_ratio = ssd->erase_slc * ssd->sp.endurance_qlc * ssd->sp.qlc_op / (ssd->erase_qlc * ssd->sp.endurance_slc * ssd->sp.slc_op);
 					ftl_log("after wl:%lf %lf %lf\n", ssd->erase_slc, ssd->erase_qlc, erase_ratio);
 					//victim_ru->mode = 0;
 				}
@@ -3170,13 +3180,7 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 		if (rum->write_ru_cnt < ssd->sp.wa_max_cnt && ssd->wa_full_flag == 1) {
 			ssd->wa_full_flag = 0;
 		}
-		if (victim_ru->area_mode == 2) {
-			victim_ru->area_mode = 1;
-			ssd->low_area_ru_num --;
-			ssd->change_area_ru_num ++;
-			ssd->total_change_area_erase += victim_ru->erase;
-			ssd->total_low_area_erase -= victim_ru->erase;
-		}
+
 		ftl_log("write_cnt:%d read_cnt:%d\n", rum->write_ru_cnt, rum->read_ru_cnt);
 		ftl_log("wa full flag:%d ra full flag:%d\n", ssd->wa_full_flag, ssd->ra_full_flag);
     	QTAILQ_INSERT_TAIL(&rum->free_ru_list, victim_ru, entry);
@@ -3598,11 +3602,12 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 			page_age = 3;
 
 		// 修改数据准入阈值
+		double erase_ratio = ssd->erase_slc * ssd->sp.endurance_qlc * ssd->sp.qlc_op / (ssd->erase_qlc * ssd->sp.endurance_slc * ssd->sp.slc_op);
 		if (ssd->cur_write_req_cnt >= (10 * ssd->sp.pgs_per_ru / 4)  && (ssd->sp.write_mode == 1 || ssd->sp.write_mode == 5)) {
 			double retry_slc = 1;
 			if (page_age == 3)
-				retry_slc = 2;
-			double c_before = ssd->action_1_cnt * SLC_W + ssd->action_2_cnt * (SLC_W + SLC_R) + ssd->action_3_cnt * (SLC_R + QLC_W);
+				retry_slc = 2;		
+			double c_before = ssd->action_1_cnt * SLC_W + ssd->action_2_cnt * (SLC_W + SLC_R * retry_slc) + ssd->action_3_cnt * (SLC_R * retry_slc + QLC_W);
 			double c_after = ssd->action_1_cnt * QLC_W;
 			
 			double ratio = c_before == 0 ? 10 : c_after / c_before;
@@ -3610,20 +3615,33 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 			double low_thre = 3.5;
 			double high_thre = 5.5;
 
-			// 减少阈值
-			if (ratio < low_thre) {
-				if (ssd->write_hotness_thre != 1) {
-					ssd->write_hotness_thre = ssd->write_hotness_thre + 1;
-					for (int j = 0;	j < 4; j ++)
-						ssd->cnt_window[j] = 0;
-				}
-			} else if (ratio > high_thre) {
-				if (ssd->write_hotness_thre != 0) {
-					ssd->write_hotness_thre = ssd->write_hotness_thre - 1;
-					for (int j = 0;	j < 4; j ++)
-						ssd->cnt_window[j] = 0;
+			if (erase_ratio >= 0.9 && erase_ratio <= 1.1)
+				ssd->wfc_flag = 0;
+
+			if (ssd->wfc_flag == 0) {
+				if (ratio < low_thre) {
+					if (ssd->write_hotness_thre != 1) {
+						ssd->write_hotness_thre = ssd->write_hotness_thre + 1;
+						for (int j = 0;	j < 4; j ++)
+							ssd->cnt_window[j] = 0;
+					}
+				} else if (ratio > high_thre) {
+					if (ssd->write_hotness_thre != 0) {
+						ssd->write_hotness_thre = ssd->write_hotness_thre - 1;
+						for (int j = 0;	j < 4; j ++)
+							ssd->cnt_window[j] = 0;
+					}
 				}
 			}
+
+			if (ssd->sp.wl_mode == 2 && erase_ratio > 1.1) {
+				ssd->write_hotness_thre = ssd->write_hotness_thre >= 4 ? 4 : ssd->write_hotness_thre + 1;
+				ssd->wfc_flag = 1;
+			} else if (ssd->sp.wl_mode == 2 && erase_ratio < 0.9) {
+				ssd->write_hotness_thre = ssd->write_hotness_thre <= 0 ? 0 : ssd->write_hotness_thre - 1;
+				ssd->wfc_flag = 2;
+			}
+
 
 			if (ssd->sp.dynamic_tm_flag == 1) {
 				// 调整四个阈值
@@ -3716,7 +3734,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 		}
 		
 		// 记录写入次数
-		if (ruhid == 2) {
+		if (ruhid == 2 || ruhid == 3) {
 			ssd->rums_qlc[0].write_cnt ++;
 		}
 		else {

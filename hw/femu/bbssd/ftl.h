@@ -282,7 +282,7 @@ struct ssdparams {
 	// read area最大超级块数量
 	int ra_max_cnt;
 
-  int wa_max_cnt;
+    int wa_max_cnt;
 
 	int dynamic_ra_flag;
 
@@ -423,8 +423,8 @@ struct ssd {
 	int *lpnrtbl;
     int *lpnwtbl;
 
-  int hit_buffer_count;
-  int total_buffer_count;
+    int hit_buffer_count;
+    int total_buffer_count;
 	
 	// 统计每个lpn的当前热度
 	double *read_hotness;

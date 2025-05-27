@@ -7,7 +7,7 @@
 # Image directory
 IMGDIR=$HOME/images
 # Virtual machine disk image
-OSIMGF=$IMGDIR/u20s.qcow2
+OSIMGF=$IMGDIR/femu.qcow2
 
 if [[ ! -e "$OSIMGF" ]]; then
 	echo ""

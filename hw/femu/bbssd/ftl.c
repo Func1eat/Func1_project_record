@@ -2,7 +2,7 @@
 #include "stdbool.h"
 // #include "uthash.h"
 //#define FEMU_DEBUG_FTL
-//#define FDP_DEBUG、
+//#define FDP_DEBUG
 
 // LRU buffer
 // 双向链表节点
@@ -282,7 +282,8 @@ static inline int should_fdp_gc(struct ssd *ssd, uint16_t rg)
 }
 
 static inline int should_fdp_gc_high(struct ssd *ssd, uint16_t rg)
-{
+{	// 首先，当slc区域设置的GC阈值不为0时，才考虑slc区域的GC
+	// 其次，当slc区域的空闲块数小于阈值时，slc区域需要GC
 	int slc_flag =  ssd->sp.gc_thres_rus_high_slc != 0 ? ssd->rums_slc[rg].free_ru_cnt <= ssd->sp.gc_thres_rus_high_slc : 0;
 	int qlc_flag =  (ssd->rums_qlc[rg].free_ru_cnt <= ssd->sp.gc_thres_rus_high_qlc);
 	// if (slc_flag || qlc_flag)
@@ -405,7 +406,7 @@ static void ssd_init_lines(struct ssd *ssd)
         line->id = i;
         line->ipc = 0;
         line->vpc = 0;
-        line->pos = 0;
+        line->pos = 0; //在victim lines的优先队列中的位置
         /* initialize all the lines as free lines */
         QTAILQ_INSERT_TAIL(&lm->free_line_list, line, entry);
         lm->free_line_cnt++;
@@ -453,6 +454,7 @@ static inline void victim_ru_set_pos(void *a, size_t pos)
     ((struct ru *)a)->pos = pos;
 }																	
 
+// here define ru_mode = 1, 将耐磨度低的ru分配给slc区域
 // 获取slc区域中第i个ru的ru_id
 int get_slc_ru_id(struct ssd *ssd, int i)
 {
@@ -503,6 +505,7 @@ static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 		rum_qlc = &ssd->rums_qlc[i];
 
 		// todo 单RG
+		// 取25%作为SLC区域,剩下75%作为QLC区域
 		rum_slc->tt_rus = spp->slc_op * 1.0 / (spp->slc_op + spp->qlc_op) * spp->blks_per_pl;
 		rum_qlc->tt_rus = spp->tt_rus - rum_slc->tt_rus;
 
@@ -568,7 +571,7 @@ static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 			ssd->indices[j] = j;
 			tmp[j] = ssd->rand_rate[j];
 		}
-		// 从大到小排序
+		// 从大到小排序:冒泡排序
 		for (int j = 0; j < spp->tt_rus - 1; j++) {
 			for (int k = 0; k < spp->tt_rus - j - 1; k++) {
 				if (tmp[k] < tmp[k + 1]) {
@@ -1065,7 +1068,7 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->pgs_per_line = spp->blks_per_line * spp->pgs_per_blk;
     spp->secs_per_line = spp->pgs_per_line * spp->secs_per_pg;
     spp->tt_lines = spp->blks_per_lun; /* TODO: to fix under multiplanes */
-
+	// 一个ru包含4个blk
     spp->blks_per_ru = RG_DEGREE; 								
     spp->pgs_per_ru = spp->blks_per_ru * spp->pgs_per_blk;
     spp->secs_per_ru = spp->pgs_per_ru * spp->secs_per_pg;
@@ -2154,7 +2157,7 @@ static struct ru *select_victim_ru_qlc(struct ssd *ssd, bool force, int rgid)
     if (!victim_ru) {
         return NULL;
     } 
-
+	// force = false 且 受害RU的无效页面数量小于RU的总页面数的一半
     if (!force && victim_ru->ipc < ssd->sp.pgs_per_ru / 2) {
         return NULL;
     }
@@ -2547,10 +2550,11 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 	ppa.g.pl = 0;
 
 	victim_ru = get_ru(ssd, &ppa);
-
+	// 此处不理解？？？
 	ruhid = victim_ru->ruhid; 
 	//ruh = &req->ns->endgrp->fdp.ruhs[ruhid];	
 	double ru_read_hotness = 0;
+	// 为啥要乘4.0？？
 	if (victim_ru->mode == 0) {
 		ru_read_hotness = victim_ru->total_value * 4.0 / victim_ru->vpc;
 	}
@@ -2570,6 +2574,7 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 		gc_pgs += fdp_clean_one_block(ssd, &ppa, rgid, ruhid, no_record_flag, hotness);
 		mark_block_free(ssd, &ppa);
 
+		// 计算GC延迟 ssd_advance_status函数的返回值lat为什么没使用？
 		if (spp->enable_gc_delay)
 		{
 			struct nand_cmd gce;
@@ -2584,7 +2589,7 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 
 		lunp->gc_endtime = lunp->next_lun_avail_time;
 	}
-	
+	// 写入的数据量达到了10个SLC超级块
 	if (ssd->cur_write_req_cnt >= (10 * ssd->sp.pgs_per_ru / 4)  && (ssd->sp.write_mode == 1 || ssd->sp.write_mode == 5) && ssd->sp.dynamic_tw_flag) {
 		double retry_slc = 1;
 		if (ssd->age == 3)
@@ -2599,6 +2604,7 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 
 		// 减少阈值
 		if (ratio < low_thre) {
+			// 此处为什么是不等于1，不应该是不等于3吗？？
 			if (ssd->write_hotness_thre != 1) {
 				ssd->write_hotness_thre = ssd->write_hotness_thre + 1;
 				for (int j = 0;	j < 4; j ++)
@@ -2611,7 +2617,6 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 					ssd->cnt_window[j] = 0;
 			}
 		}
-
 		if (ssd->sp.dynamic_tm_flag == 1) {
 			// 调整四个阈值
 			// double low_b_thre = 0.5;
@@ -2655,6 +2660,8 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 					b_after = 0;
 				}
 
+				//  b_after代表的迁移的数目p，b_before代表的淘汰的数目q
+				//  b_after = b_before = 0 会导致
 				if (b_after == 0 && b_before == 0)
 					b_ratio = ref_ratio / 3;
 				else if(b_after == 0)
@@ -2666,6 +2673,7 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 				if (b_ratio > ref_ratio / 2) {
 					// if (ssd->cnt_window[j] < 0)
 					// 	ssd->cnt_window[j] = 0;
+					// 表示统计周期+1（那这样意味着不同热度的页面修改相应淘汰阈值的时机不一定相同）
 					ssd->cnt_window[j] ++;
 					if (ssd->cnt_window[j] >= 3) {
 						ssd->gc_cnt_before_update_thre[j]= ssd->gc_cnt_before_update_thre[j] == 0? 0 : ssd->gc_cnt_before_update_thre[j] - 1;
@@ -3001,13 +3009,14 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, int gc_flag, int no_record_flag)
 {
 	struct ru *victim_ru_slc, *victim_ru_qlc = NULL;
+	// qlc区域需要gc
 	if (gc_flag >= 2) {
     	victim_ru_qlc = select_victim_ru_qlc(ssd, force, rgid);
 		if(victim_ru_qlc) {;
 			erase_victim_ru(ssd, victim_ru_qlc->id, 1, rgid, no_record_flag);
 		}
 	}
-
+	// slc区域需要gc
 	if (gc_flag == 3 || gc_flag == 1) {
 		victim_ru_slc = select_victim_ru_slc(ssd, force, rgid);
 		if(victim_ru_slc) {
@@ -3164,6 +3173,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 	int r = 0;
 	int gc_flag = 0;
 	/* perform GC here until !should_fdp_gc(ssd, rgid) */
+	// while( slc或qlc需要gc or 写加速区域满了 )
 	while ((gc_flag = should_fdp_gc_high(ssd, 0)) || ssd->wa_full_flag == 1) {
 		r = do_fdp_gc(ssd, 0, true, gc_flag, 0);
 		if (r == -1)
@@ -3209,6 +3219,8 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 			if (get_ru(ssd, &ppa)->mode == 0) {
 				ppa_map_flag = 1;
 				if (spp->write_mode == 1 || spp->write_mode == 5) {
+					// 如果这个页面热度对应的淘汰门槛为1
+					// 
 					if (ssd->gc_cnt_before_update_thre[ssd->write_hotness[lpn]] == 0) {
 						ssd->cnt_11[ssd->write_hotness[lpn]] ++;
 					} else if (ssd->gc_cnt_before_update_thre[ssd->write_hotness[lpn]] == 1) {
@@ -3273,6 +3285,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 			// 	ppa_map_flag = 2;
             /* update old page information first */
 			uint16_t old_rgid = (ppa.g.ch * spp->luns_per_ch + ppa.g.lun) / RG_DEGREE;
+			// update的数据删除原ppa可以理解，对于首次写入的数据是怎么处理的？？
 			mark_page_invalid(ssd, &ppa, old_rgid); 
             set_rmap_ent(ssd, INVALID_LPN, &ppa);
         }

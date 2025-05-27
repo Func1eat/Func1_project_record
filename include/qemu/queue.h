@@ -391,6 +391,7 @@ typedef struct QTailQLink {
  * Tail queue definitions.  The union acts as a poor man template, as if
  * it were QTailQLink<type>.
  */
+//共用体：前者适用单向链表，后者适用双向链表
 #define QTAILQ_HEAD(name, type)                                         \
 union name {                                                            \
         struct type *tqh_first;       /* first element */               \

@@ -1619,7 +1619,12 @@ typedef struct QEMU_PACKED NvmeFdpDescrHdr {
     uint32_t erutl;
     uint8_t  rsvd28[36];
 } NvmeFdpDescrHdr;
-
+// FDP允许SSD定义最初隔离（Initially Isolated）和持续隔离（Persistently Isolated）的RUH
+/*
+最初隔离的RUH配置意味着在主机写入时保证数据隔离，但这种隔离不会持续整个数据的生命周期,
+最终的GC过程可以将这些数据与其他RUH的数据混合在一起。
+持续隔离RUH意味着，数据与其他RUH的数据在数据的整个生命周期内的隔离得到了保证。
+*/ 
 enum NvmeRuhType {
     NVME_RUHT_INITIALLY_ISOLATED = 1,
     NVME_RUHT_PERSISTENTLY_ISOLATED = 2,

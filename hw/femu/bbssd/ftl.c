@@ -140,6 +140,7 @@ static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, int gc_flag, in
 static inline struct ru *get_ru(struct ssd *ssd, struct ppa *ppa);
 static void ssd_aged(struct ssd *ssd, double age_rate);
 static struct ru *select_ra_victim_ru(struct ssd *ssd);
+static void output_init_log(struct ssd *ssd);
 
 // page type 0为slc页面 1 2 3 4为balance格雷码的低到高页 5 6 7 8为unbalance格雷码的低到高页
 static int get_ppa_page_type(struct ssd *ssd, struct ppa *ppa) {
@@ -181,6 +182,7 @@ static int get_ppa_page_type(struct ssd *ssd, struct ppa *ppa) {
 	return -1;
 }
 
+// QLC的读重试*读延迟 - SLC的读延迟
 static double  get_read_lat(struct ssd *ssd, int page_type, int age){
 	int retry = 0;
 	double read_page_lat = 0;
@@ -239,6 +241,7 @@ static double  get_read_lat(struct ssd *ssd, int page_type, int age){
 	return read_page_lat - SLC_R * retry_slc;
 }
 
+//返回该ru的有效页面数量
 static double get_ru_victim_pre(struct ssd *ssd, struct ru *ru) {
 	double victim_pre = 0;
 	victim_pre = ru->vpc;
@@ -266,24 +269,25 @@ static inline int get_ruh_mode(struct ssd *ssd, int ruhid) {
 
 static inline bool should_gc(struct ssd *ssd)
 {
-    return (ssd->lm.free_line_cnt <= ssd->sp.gc_thres_lines);
+    return (ssd->lm.free_line_cnt <= ssd->sp.gc_thres_lines); // 153
 }
 
 static inline bool should_gc_high(struct ssd *ssd)
 {
-    return (ssd->lm.free_line_cnt <= ssd->sp.gc_thres_lines_high);
+    return (ssd->lm.free_line_cnt <= ssd->sp.gc_thres_lines_high); // 51
 }
 
 static inline int should_fdp_gc(struct ssd *ssd, uint16_t rg) 
 {																
- 	int slc_flag =  (ssd->rums_slc[rg].free_ru_cnt <= ssd->sp.gc_thres_rus_slc);
-	int qlc_flag =  (ssd->rums_qlc[rg].free_ru_cnt <= ssd->sp.gc_thres_rus_qlc);
-	return (qlc_flag << 1) + slc_flag; 
+ 	int slc_flag =  (ssd->rums_slc[rg].free_ru_cnt <= ssd->sp.gc_thres_rus_slc); // 15
+	int qlc_flag =  (ssd->rums_qlc[rg].free_ru_cnt <= ssd->sp.gc_thres_rus_qlc); // 46
+	return (qlc_flag << 1) + slc_flag;
 }
 
 static inline int should_fdp_gc_high(struct ssd *ssd, uint16_t rg)
 {	// 首先，当slc区域设置的GC阈值不为0时，才考虑slc区域的GC
 	// 其次，当slc区域的空闲块数小于阈值时，slc区域需要GC
+	// ssd->sp.gc_thres_rus_high_slc = 5, ssd->sp.gc_thres_rus_high_qlc = 4
 	int slc_flag =  ssd->sp.gc_thres_rus_high_slc != 0 ? ssd->rums_slc[rg].free_ru_cnt <= ssd->sp.gc_thres_rus_high_slc : 0;
 	int qlc_flag =  (ssd->rums_qlc[rg].free_ru_cnt <= ssd->sp.gc_thres_rus_high_qlc);
 	// if (slc_flag || qlc_flag)
@@ -328,6 +332,7 @@ static inline void set_maptbl_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa
     ssd->maptbl[lpn] = *ppa;
 }
 
+// 将ppa转换为page index
 static uint64_t ppa2pgidx(struct ssd *ssd, struct ppa *ppa)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -454,7 +459,8 @@ static inline void victim_ru_set_pos(void *a, size_t pos)
     ((struct ru *)a)->pos = pos;
 }																	
 
-// here define ru_mode = 1, 将耐磨度低的ru分配给slc区域
+// if define ru_mode = 1, 将耐磨度低的ru分配给slc区域
+// 此处ru_mode = 0，按照顺序分配slc和qlc区域的ru
 // 获取slc区域中第i个ru的ru_id
 int get_slc_ru_id(struct ssd *ssd, int i)
 {
@@ -485,11 +491,11 @@ int get_qlc_ru_id(struct ssd *ssd, int i)
 // 增加每个ru中rand_rate的初始化
 static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 {
+	printf("begin to allocate ru to slc&qlc\n");
 	struct ssdparams *spp = &ssd->sp;
     struct fdp_ru_mgmt *rum_slc = NULL, *rum_qlc = NULL;
     struct ru *ru = NULL;
 	int nrg = spp->tt_luns / RG_DEGREE;
-	
 	ssd->rus =  g_malloc0(sizeof(struct ru) * spp->tt_rus);
 	ssd->rums_slc = g_malloc(sizeof(struct fdp_ru_mgmt) * nrg);
 	ssd->rums_qlc = g_malloc(sizeof(struct fdp_ru_mgmt) * nrg);
@@ -499,16 +505,15 @@ static void ssd_init_fdp_ru_mgmts(struct ssd *ssd)
 	double min = 0.5;
 	double max = 1.5;
 	srand(0); // 可复现的随机序列
-
 	for (int i = 0; i < nrg; i++) {
 		rum_slc = &ssd->rums_slc[i];
 		rum_qlc = &ssd->rums_qlc[i];
 
 		// todo 单RG
-		// 取25%作为SLC区域,剩下75%作为QLC区域
 		rum_slc->tt_rus = spp->slc_op * 1.0 / (spp->slc_op + spp->qlc_op) * spp->blks_per_pl;
 		rum_qlc->tt_rus = spp->tt_rus - rum_slc->tt_rus;
-
+		printf("slc_op: %d qlc_op: %d\n", spp->slc_op, spp->qlc_op);
+		printf("rum_slc->tt_rus: %d rum_qlc->tt_rus: %d\n", rum_slc->tt_rus, rum_qlc->tt_rus);
 		QTAILQ_INIT(&rum_slc->free_ru_list);
 		QTAILQ_INIT(&rum_qlc->free_ru_list);
 		
@@ -716,11 +721,11 @@ static void ssd_init_fdp_ruhtbl(struct FemuCtrl *n, struct ssd *ssd)
 	struct ruh *ruh = NULL;
 	struct fdp_ru_mgmt *rum_slc = NULL, *rum_qlc = NULL;
 
-	ssd->fdp_enabled = n->bb_params.fdp_enabled;
+	ssd->fdp_enabled = n->bb_params.fdp_enabled; //1
 	ssd->ruhtbl = g_malloc0(sizeof(struct ruh) * (endgrp->fdp.nruh)); 
 	
 
-	// 初始化ruh的mode
+	// 初始化ruh的mode, nruh = 4
 	for (int i = 0; i < endgrp->fdp.nruh; i++) {
 		ruh = &ssd->ruhtbl[i];
 		if (i == 0 || i == 1)
@@ -735,6 +740,7 @@ static void ssd_init_fdp_ruhtbl(struct FemuCtrl *n, struct ssd *ssd)
 		// 当前指向的ru，每个rg一个
 		ruh->cur_ruids = g_malloc0(sizeof(int) * endgrp->fdp.nrg);
 		ruh->pi_gc_ruids = g_malloc0(sizeof(int) * endgrp->fdp.nrg);
+		// ruh在每个reclaim group中选择此时free的ru
 		for (int j = 0; j < endgrp->fdp.nrg; j++)  {
 			if (get_ruh_mode(ssd, i) == 0 && ssd->sp.slc_op != 0) {
 				rum_slc = &ssd->rums_slc[j];
@@ -764,10 +770,12 @@ static void ssd_init_fdp_ruhtbl(struct FemuCtrl *n, struct ssd *ssd)
 		for (int j = 0; j < MAX_RUHS; j++) {
 			if (get_ruh_mode(ssd, j) == 0  && ssd->sp.slc_op != 0) {
 				pi_gc_ruid = get_next_free_ruid(ssd, rum_slc, j);
+				ftl_log("init ruh %d pi_gc_ruid[%d] = %d in slc\n", j, i, pi_gc_ruid);
 				ssd->ruhtbl[j].pi_gc_ruids[i] = pi_gc_ruid;
 				ssd->rus[pi_gc_ruid].rut = RU_TYPE_PI_GC;
 			} else if (get_ruh_mode(ssd, j) == 1 && ssd->sp.qlc_op != 0) {
 				pi_gc_ruid = get_next_free_ruid(ssd, rum_qlc, j);
+				ftl_log("init ruh %d pi_gc_ruid[%d] = %d in qlc\n", j, i, pi_gc_ruid);
 				ssd->ruhtbl[j].pi_gc_ruids[i] = pi_gc_ruid;
 				ssd->rus[pi_gc_ruid].rut = RU_TYPE_PI_GC;
 			}
@@ -868,6 +876,7 @@ static void ssd_advance_write_pointer(struct ssd *ssd)
         }
     }
 }
+// 根据写入方式（GC写入、正常写入）更新wp。若当前ru写完了，分配新的ru。
 static void ssd_advance_fdp_write_pointer(struct ssd *ssd, uint16_t rgid, int lpn, uint16_t ruhid, bool for_gc, int mode)
 {
 	struct ssdparams *spp = &ssd->sp;
@@ -911,6 +920,8 @@ static void ssd_advance_fdp_write_pointer(struct ssd *ssd, uint16_t rgid, int lp
             	ru->wp.pg += 4;
 			else
 				ru->wp.pg += 1;
+			// 当前ru写到了blk的最后一页，不等于写满了，但需要擦除这个blk后才能继续覆盖写
+			// 所以剩下的数据需要新找一个ru存放
 			if (ru->wp.pg == spp->pgs_per_blk) {
 				ru->wp.pg = 0;
 				if (ru->vpc == spp->pgs_per_ru) {
@@ -957,7 +968,7 @@ static void ssd_advance_fdp_write_pointer(struct ssd *ssd, uint16_t rgid, int lp
 	}
 }
 static struct ppa fdp_get_new_page(struct ssd *ssd, uint16_t rgid, 
-		int lpn, uint16_t ruhid, bool for_gc, int mode)
+		 uint16_t ruhid, bool for_gc, int mode)
 {
 	struct fdp_ru_mgmt *rum = NULL;
 	if (mode == 0)
@@ -986,7 +997,7 @@ static struct ppa fdp_get_new_page(struct ssd *ssd, uint16_t rgid,
 	ppa.g.blk = ru->wp.blk;
 	ppa.g.pl = ru->wp.pl; 
 
-    ftl_assert(ppa.g.pl == 0);
+    ftl_assert(ppa.g.pl == 0); //单plane
     return ppa;
 }																	
 
@@ -1068,7 +1079,6 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->pgs_per_line = spp->blks_per_line * spp->pgs_per_blk;
     spp->secs_per_line = spp->pgs_per_line * spp->secs_per_pg;
     spp->tt_lines = spp->blks_per_lun; /* TODO: to fix under multiplanes */
-	// 一个ru包含4个blk
     spp->blks_per_ru = RG_DEGREE; 								
     spp->pgs_per_ru = spp->blks_per_ru * spp->pgs_per_blk;
     spp->secs_per_ru = spp->pgs_per_ru * spp->secs_per_pg;
@@ -1333,7 +1343,8 @@ void ssd_init(FemuCtrl *n)
 
 	double age_rate = 0.6;
 	ssd_aged(ssd, age_rate);
-    qemu_thread_create(&ssd->ftl_thread, "FEMU-FTL-Thread", ftl_thread, n,
+	output_init_log(ssd); // 输出当前已分配的逻辑页信息
+	qemu_thread_create(&ssd->ftl_thread, "FEMU-FTL-Thread", ftl_thread, n,
                        QEMU_THREAD_JOINABLE);
 }
 
@@ -1732,6 +1743,7 @@ static void mark_page_valid(struct ssd *ssd, struct ppa *ppa)
 		ru->victim_pre = get_ru_victim_pre(ssd, ru);
 		if (ru->mode == 0) {
 			ssd->slc_valid_cnt += 1;
+			// 计算slc区域所有页面的利用率
 			ssd->slc_util = ssd->slc_valid_cnt * 4.0 / ssd->sp.pgs_per_ru / ssd->rums_slc[0].tt_rus;
 		}
 	}
@@ -1814,9 +1826,9 @@ static void read_req_migrate(struct ssd *ssd, uint64_t lpn) {
 
 	// to do ruhid定为1，rg定为0
 	if (spp->read_migration == 3) {
-		ppa = fdp_get_new_page(ssd, 0, 0, 1, false, mode);
+		ppa = fdp_get_new_page(ssd, 0, 1, false, mode);
 	} else 
-		ppa = fdp_get_new_page(ssd, 0, 0, 0, false, mode);
+		ppa = fdp_get_new_page(ssd, 0, 0, false, mode);
 
 	ssd->slc_write_cnt ++;
 
@@ -1879,8 +1891,7 @@ static uint64_t fdp_gc_write_page(struct ssd *ssd, struct ppa *old_ppa, uint16_t
 
 	int mode = get_ruh_mode(ssd, ruhid);
 
-	new_ppa = fdp_get_new_page(ssd, rgid, lpn, ruhid, true, mode);
-	
+	new_ppa = fdp_get_new_page(ssd, rgid, ruhid, true, mode);
 	if (ssd->sp.write_mode == 1 && ssd->sp.read_migration == 3 && ruhid == 2) {
 		int page_type = get_ppa_page_type(ssd, &new_ppa);
 		double read_page_lat = get_read_lat(ssd, page_type, ssd->age);
@@ -1902,8 +1913,10 @@ static uint64_t fdp_gc_write_page(struct ssd *ssd, struct ppa *old_ppa, uint16_t
 			ssd->sp.pages_from_migrate ++;
 			ssd->cur_write_req_cnt ++;
 			struct ppa ppa;
-			ppa = fdp_get_new_page(ssd, 0, 0, 1, false, 0);
+			// 在读加速区域中分配一个新的页面
+			ppa = fdp_get_new_page(ssd, 0, 1, false, 0);
 			ssd->slc_write_cnt ++;
+			
 			/* update maptbl */
 			// 不去除原有映射，而是加上备份映射
 			set_back_maptbl_ent(ssd, lpn, &ppa);
@@ -2325,7 +2338,7 @@ static int fdp_clean_one_block(struct ssd *ssd, struct ppa *ppa, uint16_t rgid, 
 						ssd->cur_write_req_cnt ++;
 
 						struct ppa back_ppa;
-						back_ppa = fdp_get_new_page(ssd, 0, 0, 1, true, 0);
+						back_ppa = fdp_get_new_page(ssd, 0, 1, true, 0);
 						ssd->slc_write_cnt ++;
 
 						/* update maptbl */
@@ -2550,7 +2563,6 @@ static void erase_victim_ru(struct ssd *ssd, int victim_ru_id, int mode,  uint16
 	ppa.g.pl = 0;
 
 	victim_ru = get_ru(ssd, &ppa);
-	// 此处不理解？？？
 	ruhid = victim_ru->ruhid; 
 	//ruh = &req->ns->endgrp->fdp.ruhs[ruhid];	
 	double ru_read_hotness = 0;
@@ -3039,7 +3051,7 @@ static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, int gc_flag, in
 static void ssd_pre_read(struct ssd *ssd, uint64_t lpn, int page_num) {
 	int ruhid = 2;
 	int mode = get_ruh_mode(ssd, ruhid);
-	struct ppa ppa = fdp_get_new_page(ssd, 0, 0, ruhid, false, mode);
+	struct ppa ppa = fdp_get_new_page(ssd, 0, ruhid, false, mode);
 
 	/* update maptbl */
 	set_maptbl_ent(ssd, lpn, &ppa);
@@ -3198,7 +3210,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 	}
 
 	(ssd->sp).pages_from_host += RG_DEGREE;
-	
+	ftl_log("(ssd->sp).pages_from_host: %lu\n", (ssd->sp).pages_from_host);
 	for (int i = 0; i < RG_DEGREE; i++) {
 		DLinkedNode *tail = removeTail(write_buffer);
 		uint64_t lpn = tail->lpn;
@@ -3209,12 +3221,18 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 		write_buffer->size--;
 		free(tail);
 
-		int write_flag = 1;
+		int write_flag = 1; // 数据写入slc后设置为0，qlc后设置为1
         ppa = get_maptbl_ent(ssd, lpn);
 
+		ftl_log("record write lpn\n");
+		char pathwrite[80] = "write.log";
+		FILE *fp_write_record = fopen(pathwrite, "a+");
+		fprintf(fp_write_record, "%"PRIu64" %d %d %d %d\n", lpn, ppa.g.ch, ppa.g.lun, ppa.g.blk, ppa.g.pg);
 		struct ppa back_ppa = get_back_maptbl_ent(ssd, lpn);
+		
 	
-		int ppa_map_flag = 0;
+		int ppa_map_flag = 0; // 0表示首次写入，1表示更新的数据
+		// 若是更新数据，统计更新次数，将之前ppa设为无效
         if (mapped_ppa(&ppa)) {
 			if (get_ru(ssd, &ppa)->mode == 0) {
 				ppa_map_flag = 1;
@@ -3298,17 +3316,17 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 			ssd->back_maptbl[lpn].ppa = UNMAPPED_PPA;
 		}
 
-		// 基于动态变化的热度阈值
+		// 基于动态变化的热度阈值判断写入的区域
 		if (spp->write_mode == 1 || spp->write_mode == 5) {
-			if (ppa_map_flag == 1) {
+			if (ppa_map_flag == 1) { 
 				write_flag = 0;
 			}
 			if (ssd->write_hotness[lpn] >= ssd->write_hotness_thre) {
 				write_flag = 0;
-				ssd->action_1_cnt ++;
+				ssd->action_1_cnt ++; //slc
 			} else {
 				write_flag = 1;
-				ssd->action_4_cnt ++;
+				ssd->action_4_cnt ++; //qlc
 			}
 		}
 
@@ -3412,6 +3430,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 		}
 
 		// 修改数据准入阈值
+		// 当写入的数据量累计到达十个超级块的大小
 		if (ssd->cur_write_req_cnt >= (10 * ssd->sp.pgs_per_ru / 4)  && (ssd->sp.write_mode == 1 || spp->write_mode == 5) && ssd->sp.dynamic_tw_flag) {
 			double retry_slc = 1;
 			if (ssd->age == 3)
@@ -3425,6 +3444,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 			double high_thre = 5.5;
 
 			// 减少阈值
+			ftl_log("write_hotness_thre:%d\n", ssd->write_hotness_thre);
 			if (ratio < low_thre) {
 				if (ssd->write_hotness_thre != 1) {
 					ssd->write_hotness_thre = ssd->write_hotness_thre + 1;
@@ -3439,6 +3459,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 				}
 			}
 
+			// 该flag标识准入阈值是否发生变化？
 			if (ssd->sp.dynamic_tm_flag == 1) {
 				// 调整四个阈值
 				// double low_b_thre = 0.5;
@@ -3484,7 +3505,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 
 					if (b_after == 0 && b_before == 0)
 						b_ratio = ref_ratio / 3;
-					else if(b_after == 0)
+					else if(b_after == 0) // b_after为0表示没有更新数据
 						b_ratio = 1000;
 					else
 						b_ratio = b_before/b_after;
@@ -3494,7 +3515,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 						// if (ssd->cnt_window[j] < 0)
 						// 	ssd->cnt_window[j] = 0;
 						ssd->cnt_window[j] ++;
-						if (ssd->cnt_window[j] >= 3) {
+						if (ssd->cnt_window[j] >= 3) { // 这里逻辑感觉有问题？这个条件能判断连续三个周期都是if (b_ratio > ref_ratio / 2)吗？
 							ssd->gc_cnt_before_update_thre[j]= ssd->gc_cnt_before_update_thre[j] == 0? 0 : ssd->gc_cnt_before_update_thre[j] - 1;
 							ssd->cnt_window[j] = 0;
 						}
@@ -3541,7 +3562,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 
         /* new write */
 		int mode = get_ruh_mode(ssd, ruhid);
-		ppa = fdp_get_new_page(ssd, 0, 0, ruhid, false, mode);
+		ppa = fdp_get_new_page(ssd, 0, ruhid, false, mode);
 
 
 		// 写入QLC区域时判断是否需要读加速
@@ -3660,8 +3681,8 @@ static void ssd_aged(struct ssd *ssd, double age_rate) {
 
 			int ruhid = 3;
 			/* new write */
-			int mode = get_ruh_mode(ssd, ruhid);
-			ppa = fdp_get_new_page(ssd, 0, 0, ruhid, false, mode);
+			int mode = get_ruh_mode(ssd, ruhid); //qlc
+			ppa = fdp_get_new_page(ssd, 0, ruhid, false, mode); 
 
 			/* update maptbl */
 			set_maptbl_ent(ssd, lpn, &ppa);
@@ -3676,6 +3697,24 @@ static void ssd_aged(struct ssd *ssd, double age_rate) {
 	}
 }
 
+static void output_init_log(struct ssd *ssd) {
+	ftl_log("output the init log\n");
+	char path2init[80] = "init.log";
+	FILE *fp_init = fopen(path2init, "w+");
+	uint64_t tt_lpn = 30720 * 64;
+	uint64_t start_lpn = 0;
+	for (uint64_t lpn = start_lpn; lpn <= tt_lpn; lpn++) {
+		struct ppa ppa = get_maptbl_ent(ssd, lpn);
+		if (mapped_ppa(&ppa)) {
+			fprintf(fp_init, "%"PRIu64" %d %d %d %d\n", lpn, ppa.g.ch, ppa.g.lun, ppa.g.blk, ppa.g.pg);
+		}
+		else{
+			fprintf(fp_init, "%"PRIu64" ppa not exit\n", lpn);
+		}
+	}
+	
+}
+
 static void *ftl_thread(void *arg)
 {
     FemuCtrl *n = (FemuCtrl *)arg;
@@ -3686,7 +3725,7 @@ static void *ftl_thread(void *arg)
     int i;
 
     while (!*(ssd->dataplane_started_ptr)) {
-        usleep(100000);
+        usleep(100000); // 单位是微秒
     }
 
     /* FIXME: not safe, to handle ->to_ftl and ->to_poller gracefully */
@@ -3775,7 +3814,7 @@ static void *ftl_thread(void *arg)
 
             req->reqlat = lat;
             req->expire_time += lat;
-
+			// 将处理后的请求通过poller返回给上层
             rc = femu_ring_enqueue(ssd->to_poller[i], (void *)&req, 1);
             if (rc != 1) {
                 ftl_err("FTL to_poller enqueue failed\n");

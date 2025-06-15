@@ -577,6 +577,13 @@ int get_qlc_ru_id(struct ssd *ssd, int i);
 #define ftl_log(fmt, ...) \
     do { printf("[FEMU] FTL-Log: " fmt, ## __VA_ARGS__); } while (0)
 
+#ifdef FEMU_OBSERVE_FTL
+#define ftl_observe(fmt, ...) \
+    do { printf("[FEMU] FTL-Observe: " fmt, ## __VA_ARGS__); } while (0)
+#else
+#define ftl_observe(fmt, ...) \
+    do { } while (0)
+#endif
 
 /* FEMU assert() */
 #ifdef FEMU_DEBUG_FTL

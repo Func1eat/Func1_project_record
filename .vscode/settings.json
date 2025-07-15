@@ -28,5 +28,6 @@
     "variant": "c",
     "ftl.h": "c",
     "*.def": "c"
-  }
+  },
+  "C_Cpp_Runner.msvcBatchPath": ""
 }

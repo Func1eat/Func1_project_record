@@ -9,7 +9,7 @@
       "stopAtEntry": false,
       "externalConsole": false,
       "cwd": "/home/huangkeyu/fdp_simulator",
-      "program": "/home/huangkeyu/fdp_simulator/build/Release/outRelease",
+      "program": "/home/huangkeyu/fdp_simulator/build/Debug/outDebug",
       "MIMode": "gdb",
       "miDebuggerPath": "gdb",
       "setupCommands": [

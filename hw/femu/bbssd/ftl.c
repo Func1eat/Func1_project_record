@@ -3410,6 +3410,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 			ftl_log("hit_ratio = %lf cold_migrate_ratio:%lf\n", hit_ratio, cold_migrate_ratio);
 			ftl_log("combo_write_thre:%d combo_gc_cnt_thre:%d\n", ssd->combo_write_thre, ssd->combo_gc_cnt_thre);
 		}
+		ftl_log("action_1_cnt:%lf action_2_cnt:%lf action_3_cnt:%lf action_4_cnt:%lf\n", ssd->action_1_cnt, ssd->action_2_cnt, ssd->action_3_cnt, ssd->action_4_cnt);
 
 		// 修改数据准入阈值
 		if (ssd->cur_write_req_cnt >= (10 * ssd->sp.pgs_per_ru / 4)  && (ssd->sp.write_mode == 1 || spp->write_mode == 5) && ssd->sp.dynamic_tw_flag) {

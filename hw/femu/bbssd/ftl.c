@@ -138,7 +138,7 @@ static void output_info_log(struct ssd *ssd);
 static void read_req_migrate(struct ssd *ssd, uint64_t lpn);
 static int do_fdp_gc(struct ssd *ssd, uint16_t rgid, bool force, int gc_flag, int no_record_flag);
 static inline struct ru *get_ru(struct ssd *ssd, struct ppa *ppa);
-static void ssd_aged(struct ssd *ssd, double age_rate);
+//static void ssd_aged(struct ssd *ssd, double age_rate);
 static struct ru *select_ra_victim_ru(struct ssd *ssd);
 
 // page type 0为slc页面 1 2 3 4为balance格雷码的低到高页 5 6 7 8为unbalance格雷码的低到高页
@@ -1370,8 +1370,8 @@ void ssd_init(FemuCtrl *n)
 	ssd->combo_write_thre = 128;
 	ssd->combo_gc_cnt_thre = 1;
 
-	double age_rate = 0.6;
-	ssd_aged(ssd, age_rate);
+	// double age_rate = 0.6;
+	// ssd_aged(ssd, age_rate);
     qemu_thread_create(&ssd->ftl_thread, "FEMU-FTL-Thread", ftl_thread, n,
                        QEMU_THREAD_JOINABLE);
 }
@@ -3384,19 +3384,17 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 		DLinkedNode *tail = removeTail(write_buffer);
 		uint64_t lpn = tail->lpn;
 		int lba_num = tail->lba_num;
-		// ftl_log("lpn:%"PRIu64", lba_num:%d\n", lpn, lba_num);
-		// 释放空间
 		write_buffer->cache[tail->lpn] = NULL;
 		write_buffer->size--;
 		free(tail);
 
 		int write_flag = 1;
         ppa = get_maptbl_ent(ssd, lpn);
-
 		struct ppa back_ppa = get_back_maptbl_ent(ssd, lpn);
 	
 		int ppa_map_flag = 0;
         if (mapped_ppa(&ppa)) {
+			printf("exit ppa mapped\n");
 			if (get_ru(ssd, &ppa)->mode == 0) {
 				ppa_map_flag = 1;
 				if (spp->write_mode == 1 || spp->write_mode == 5) {
@@ -3464,7 +3462,8 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 			// 	ppa_map_flag = 2;
             /* update old page information first */
 			uint16_t old_rgid = (ppa.g.ch * spp->luns_per_ch + ppa.g.lun) / RG_DEGREE;
-			mark_page_invalid(ssd, &ppa, old_rgid); 
+			mark_page_invalid(ssd, &ppa, old_rgid);
+			printf("mark invalid lpn:%"PRIu64" lba_num:%d to ppa ch:%d lun:%d blk:%d pl:%d pg:%d sec:%d\n", lpn, lba_num, ppa.g.ch, ppa.g.lun, ppa.g.blk, ppa.g.pl, ppa.g.pg, ppa.g.sec);
             set_rmap_ent(ssd, INVALID_LPN, &ppa);
         }
 
@@ -3591,15 +3590,15 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 			ftl_log("hit_ratio = %lf cold_migrate_ratio:%lf\n", hit_ratio, cold_migrate_ratio);
 			ftl_log("combo_write_thre:%d combo_gc_cnt_thre:%d\n", ssd->combo_write_thre, ssd->combo_gc_cnt_thre);
 		}
-		
-		struct ru *ru = get_ru(ssd, &ppa);
+
+		// struct ru *ru = get_ru(ssd, &ppa);
 		int page_age = 0;
-		if ((ru->mode == 0 && ru->erase < ssd->sp.endurance_slc / 3) || (ru->mode == 1 && ru->erase < ssd->sp.endurance_qlc / 3)) {
-			page_age = 0;
-		} else if ((ru->mode == 0 && ru->erase >= ssd->sp.endurance_slc / 3 && ru->erase < ssd->sp.endurance_slc * 2 / 3) || (ru->mode == 1 && ru->erase >= ssd->sp.endurance_qlc / 3 && ru->erase < ssd->sp.endurance_qlc * 2 / 3)) {
-			page_age = 2;
-		} else
-			page_age = 3;
+		// if ((ru->mode == 0 && ru->erase < ssd->sp.endurance_slc / 3) || (ru->mode == 1 && ru->erase < ssd->sp.endurance_qlc / 3)) {
+		// 	page_age = 0;
+		// } else if ((ru->mode == 0 && ru->erase >= ssd->sp.endurance_slc / 3 && ru->erase < ssd->sp.endurance_slc * 2 / 3) || (ru->mode == 1 && ru->erase >= ssd->sp.endurance_qlc / 3 && ru->erase < ssd->sp.endurance_qlc * 2 / 3)) {
+		// 	page_age = 2;
+		// } else
+		// 	page_age = 3;
 
 		// 修改数据准入阈值
 		double erase_ratio = ssd->erase_slc * ssd->sp.endurance_qlc * ssd->sp.qlc_op / (ssd->erase_qlc * ssd->sp.endurance_slc * ssd->sp.slc_op);
@@ -3745,8 +3744,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 
         /* new write */
 		int mode = get_ruh_mode(ssd, ruhid);
-		ppa = fdp_get_new_page(ssd, 0, 0, ruhid, false, mode);
-
+		ppa = fdp_get_new_page(ssd, 0, 0, ruhid, false, mode);		
 
 		// 写入QLC区域时判断是否需要读加速
 		if (ruhid == 2 && (ssd->sp.write_mode == 1 || ssd->sp.write_mode == 5) && ssd->sp.read_migration == 3) {
@@ -3774,6 +3772,7 @@ static uint64_t ssd_write_flush(struct ssd *ssd, NvmeRequest *req) {
 
         /* update maptbl */
         set_maptbl_ent(ssd, lpn, &ppa);
+		printf("Write flush lpn:%"PRIu64" lba_num:%d to ppa ch:%d lun:%d blk:%d pl:%d pg:%d sec:%d\n", lpn, lba_num, ppa.g.ch, ppa.g.lun, ppa.g.blk, ppa.g.pl, ppa.g.pg, ppa.g.sec);
         /* update rmap */
         set_rmap_ent(ssd, lpn, &ppa);
 		
@@ -3818,6 +3817,7 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
     uint64_t lpn;
     uint64_t curlat = 0, maxlat = 0;
+	printf("write record: lba=%"PRIu64", len=%d, start_lpn=%"PRIu64", end_lpn=%"PRIu64"\n", lba, len, start_lpn, end_lpn);
 
     if (end_lpn >= spp->tt_pgs) {
         ftl_err("start_lpn=%"PRIu64",tt_pgs=%d\n", start_lpn, ssd->sp.tt_pgs);
@@ -3844,41 +3844,41 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 }
 
 //预先填充QLC区域
-static void ssd_aged(struct ssd *ssd, double age_rate) {
-	uint64_t tt_lpn = 30720 * 64;
-	uint64_t start_lpn = 0;
-	uint64_t end_lpn = age_rate * tt_lpn;
-	// ftl_log("start_lpn:%"PRIu64" end_lpn:%"PRIu64"\n", start_lpn, end_lpn);
-	struct ppa ppa;
-	for (int i = 0; i < 2; i ++) {
-		for (uint64_t lpn = start_lpn; lpn <= end_lpn; lpn++) {
-			int gc_flag;
-			while ((gc_flag = should_fdp_gc_high(ssd, 0)) || ssd->wa_full_flag == 1) {
-				do_fdp_gc(ssd, 0, true, gc_flag, 1);
-			}
-			ppa = get_maptbl_ent(ssd, lpn);
-			if (mapped_ppa(&ppa)) {
-				mark_page_invalid(ssd, &ppa, 0); 
-				set_rmap_ent(ssd, INVALID_LPN, &ppa);
-			}
+// static void ssd_aged(struct ssd *ssd, double age_rate) {
+// 	uint64_t tt_lpn = 30720 * 64;
+// 	uint64_t start_lpn = 0;
+// 	uint64_t end_lpn = age_rate * tt_lpn;
+// 	// ftl_log("start_lpn:%"PRIu64" end_lpn:%"PRIu64"\n", start_lpn, end_lpn);
+// 	struct ppa ppa;
+// 	for (int i = 0; i < 2; i ++) {
+// 		for (uint64_t lpn = start_lpn; lpn <= end_lpn; lpn++) {
+// 			int gc_flag;
+// 			while ((gc_flag = should_fdp_gc_high(ssd, 0)) || ssd->wa_full_flag == 1) {
+// 				do_fdp_gc(ssd, 0, true, gc_flag, 1);
+// 			}
+// 			ppa = get_maptbl_ent(ssd, lpn);
+// 			if (mapped_ppa(&ppa)) {
+// 				mark_page_invalid(ssd, &ppa, 0); 
+// 				set_rmap_ent(ssd, INVALID_LPN, &ppa);
+// 			}
 
-			int ruhid = 2;
-			/* new write */
-			int mode = get_ruh_mode(ssd, ruhid);
-			ppa = fdp_get_new_page(ssd, 0, 0, ruhid, false, mode);
+// 			int ruhid = 2;
+// 			/* new write */
+// 			int mode = get_ruh_mode(ssd, ruhid);
+// 			ppa = fdp_get_new_page(ssd, 0, 0, ruhid, false, mode);
 
-			/* update maptbl */
-			set_maptbl_ent(ssd, lpn, &ppa);
-			/* update rmap */
-			set_rmap_ent(ssd, lpn, &ppa);
+// 			/* update maptbl */
+// 			set_maptbl_ent(ssd, lpn, &ppa);
+// 			/* update rmap */
+// 			set_rmap_ent(ssd, lpn, &ppa);
 
-			mark_page_valid(ssd, &ppa);
+// 			mark_page_valid(ssd, &ppa);
 
-			/* need to advance the write pointer here */
-			ssd_advance_fdp_write_pointer(ssd, 0, 0, ruhid, false, mode);
-		}
-	}
-}
+// 			/* need to advance the write pointer here */
+// 			ssd_advance_fdp_write_pointer(ssd, 0, 0, ruhid, false, mode);
+// 		}
+// 	}
+// }
 
 static void *ftl_thread(void *arg)
 {
